@@ -36,11 +36,11 @@ Thay vào đó:
 Bình thường khi:
 - Server restart (`stop.ps1` / `start.ps1`, hoặc Ctrl+C `npm start`) trong lúc ChatGPT đang kết nối
 - ChatGPT đóng stream SSE sau khi đổi quyền
-- Tunnel URL đổi (chạy lại `tunnel.bat` cloudflared) mà chưa update Connector URL
+- Tunnel URL đổi (chạy lại `tunnel.ps1` cloudflared) mà chưa update Connector URL
 
 **Fix:** Giữ server + tunnel chạy ổn định, không restart giữa chừng. Nếu restart → Refresh connector + chat mới.
 
-**Khuyến nghị:** Dùng OpenAI Secure MCP Tunnel — `tunnel_id` cố định, không cần đổi URL connector mỗi lần. Trên Windows: `openai-tunnel.bat`. Trên macOS/Linux script này không chạy (PowerShell + bản Windows), phải tự tải binary từ [openai/tunnel-client](https://github.com/openai/tunnel-client/releases).
+**Khuyến nghị:** Dùng OpenAI Secure MCP Tunnel — `tunnel_id` cố định, không cần đổi URL connector mỗi lần. Trên Windows: `openai-tunnel.ps1`. Trên macOS/Linux script này không chạy (PowerShell + bản Windows), phải tự tải binary từ [openai/tunnel-client](https://github.com/openai/tunnel-client/releases).
 
 ## Tool profile — `slim` (mặc định) vs `full`
 
@@ -71,7 +71,8 @@ Bình thường khi:
 | `Bash` | `run_command` | Lệnh ngắn, chờ xong |
 | Background shell | `start_process` + `process_output` | |
 | `Rewind` | `rewind` | `list` / `preview` / `restore` — undo file edits qua checkpoint tự động |
-| — | `mcp_servers`, `mcp_tools`, `mcp_call` | Gọi MCP server khác trên máy (hub). `mcp_tools`/`mcp_call` chỉ có ở `full` |
+| — | `<server>__<tool>` | MCP upstream đang `enabled` được expose trực tiếp, ví dụ `chrome-devtools__list_pages`, `linear__get_user` |
+| — | `mcp_servers`, `mcp_tools`, `mcp_call` | Diagnostic/fallback cho MCP upstream. `mcp_tools`/`mcp_call` chỉ có ở `full` |
 | — | Admin UI `:<ADMIN_PORT>/ui` | Import MCP từ Cursor / Claude Code / OpenCode (mặc định 3001) |
 | — | `apply_patch` | Codex/OpenAI style (thêm so với Claude) |
 | — | `git_*`, `git_restore` | Git tools riêng (Claude dùng Bash) |
@@ -150,14 +151,14 @@ Dùng `dry_run: true` để xem diff trước khi ghi.
 
 ```powershell
 .\start.ps1 -Force          # Terminal 1: MCP server
-.\openai-tunnel.bat         # Terminal 2: OpenAI tunnel (URL cố định)
+.\openai-tunnel.ps1         # Terminal 2: OpenAI tunnel (URL cố định)
 ```
 
-**Lần đầu:** chạy `.\openai-tunnel-init.bat` → nhập `tunnel_id` + Runtime API key từ [Platform Tunnels](https://platform.openai.com/settings/organization/tunnels).
+**Lần đầu:** chạy `.\openai-tunnel.ps1 -Init` → nhập `tunnel_id` + Runtime API key từ [Platform Tunnels](https://platform.openai.com/settings/organization/tunnels).
 
-Tunnel cũ (URL đổi mỗi lần): `.\tunnel.bat` (cloudflared).
+Tunnel cũ (URL đổi mỗi lần): `.\tunnel.ps1` (cloudflared).
 
-**macOS / Linux** — các file `.bat` / `.ps1` không chạy được:
+**macOS / Linux** — các script `.ps1` không chạy trực tiếp:
 
 ```bash
 npm start                                    # Terminal 1: MCP server

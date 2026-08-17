@@ -1,13 +1,13 @@
 import fs from "fs/promises";
 import path from "path";
+import { resolveComputerUseSkillPath } from "./plugin-config.js";
 
 export interface SkillSummary {
   name: string;
   description: string;
   path: string;
+  source?: "project" | "plugin";
 }
-
-const MAX_SKILLS = 20;
 
 function parseFrontmatter(content: string): { name?: string; description?: string } {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
@@ -23,7 +23,7 @@ export async function loadProjectSkills(workspaceRoot: string): Promise<SkillSum
   const out: SkillSummary[] = [];
 
   async function walk(dir: string, depth: number): Promise<void> {
-    if (depth > 3 || out.length >= MAX_SKILLS) return;
+    if (depth > 3) return;
     let entries;
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
@@ -31,7 +31,6 @@ export async function loadProjectSkills(workspaceRoot: string): Promise<SkillSum
       return;
     }
     for (const entry of entries) {
-      if (out.length >= MAX_SKILLS) break;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         const skillFile = path.join(full, "SKILL.md");
@@ -49,13 +48,69 @@ export async function loadProjectSkills(workspaceRoot: string): Promise<SkillSum
   }
 
   await walk(skillsDir, 0);
+  const computerUseSkill = await resolveComputerUseSkillPath();
+  if (computerUseSkill) {
+    const content = await fs.readFile(computerUseSkill, "utf-8");
+    const frontmatter = parseFrontmatter(content);
+    out.push({
+      name: frontmatter.name || "computer-use",
+      description: (frontmatter.description || "Control Windows apps from ChatGPT").slice(0, 200),
+      path: computerUseSkill,
+      source: "plugin",
+    });
+  }
   return out;
 }
 
 export function formatSkillsForInstructions(skills: SkillSummary[]): string {
   if (!skills.length) return "";
   return [
-    "## Skills (invoke manually — ChatGPT has no /slash; describe the skill in your prompt)",
-    ...skills.map((s) => `- **${s.name}**: ${s.description}`),
+    "## Skills",
+    `${skills.length} skills are available. Call list_skills, then load_skill(name) before applying a matching workflow; do not guess a skill body from its name.`,
+    skills.some((skill) => skill.name === "computer-use") ? "Computer Use plugin is enabled: load_skill(\"computer-use\") before any Windows UI automation." : "",
   ].join("\n");
+}
+
+export async function loadProjectSkill(
+  workspaceRoot: string,
+  name: string,
+  maxBytes = 200_000
+): Promise<{
+  skill: SkillSummary;
+  content: string;
+  truncated: boolean;
+  references?: Array<{ path: string; content: string; truncated: boolean }>;
+}> {
+  const skill = (await loadProjectSkills(workspaceRoot)).find((candidate) => candidate.name === name);
+  if (!skill) throw new Error(`Unknown project skill: ${name}`);
+  const data = await fs.readFile(skill.path);
+  const content = data.subarray(0, maxBytes).toString("utf-8");
+  let remaining = maxBytes - Buffer.byteLength(content);
+  let truncated = data.length > maxBytes;
+  const references: Array<{ path: string; content: string; truncated: boolean }> = [];
+
+  if (skill.source === "plugin" && skill.name === "computer-use" && remaining > 0) {
+    const pluginRoot = path.resolve(path.dirname(skill.path), "..", "..");
+    for (const file of ["guidance.md", "api.md", "confirmations.md"]) {
+      const referencePath = path.join(pluginRoot, "docs", file);
+      try {
+        const reference = await fs.readFile(referencePath);
+        const referenceContent = reference.subarray(0, remaining).toString("utf-8");
+        const referenceTruncated = reference.length > remaining;
+        references.push({ path: referencePath, content: referenceContent, truncated: referenceTruncated });
+        remaining -= Buffer.byteLength(referenceContent);
+        truncated ||= referenceTruncated;
+        if (remaining <= 0) break;
+      } catch {
+        // A Codex version may omit an optional Computer Use reference document.
+      }
+    }
+  }
+
+  return {
+    skill,
+    content,
+    truncated,
+    ...(references.length ? { references } : {}),
+  };
 }

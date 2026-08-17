@@ -19,7 +19,7 @@ process.env.MCP_SHELL_STATE_DIR = stateDir;
 let passed = 0;
 let failed = 0;
 function ok(m) { console.log(`OK  ${m}`); passed++; }
-function fail(m, e) { console.error(`FAIL ${m}: ${e}`); failed++; }
+function fail(m, e) { console.error(`FAIL ${m}: ${e && e.stack || e}`); failed++; }
 
 try {
   await fs.rm(stateDir, { recursive: true, force: true });

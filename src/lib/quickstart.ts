@@ -17,7 +17,8 @@ All tools return JSON: { ok, tool, summary, data }
 - run_command: persistent shell (cd persists); shell_status / shell_reset
 - git_status / git_diff / git_add / git_commit / git_branch / git_restore / git_stash
 - rewind: action=list|preview|restore|status — undo file edits via automatic checkpoints
-- mcp_servers / mcp_tools / mcp_call — delegate to upstream MCP servers on this machine
+- enabled upstream MCP tools are exposed directly as <server>__<tool> (for example chrome-devtools__list_pages, linear__get_user); prefer direct tools
+- mcp_servers / mcp_tools / mcp_call — upstream diagnostics/fallback when a direct proxy is unavailable
 - git_push / git_checkout / delete_directory: may be blocked by ChatGPT safety — use run_command fallback
 
 ## apply_patch — single file

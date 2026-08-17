@@ -4,6 +4,12 @@ import os from "os";
 
 export type UpstreamTransport = "stdio" | "http";
 export type UpstreamExposeMode = "none" | "meta_only" | "allowlist" | "all";
+export type UpstreamAuthMode = "auto" | "oauth" | "none";
+
+export interface UpstreamAuthConfig {
+  type: UpstreamAuthMode;
+  scope?: string;
+}
 
 export interface UpstreamServerConfig {
   id: string;
@@ -15,9 +21,13 @@ export interface UpstreamServerConfig {
   env?: Record<string, string>;
   cwd?: string;
   url?: string;
+  headers?: Record<string, string>;
+  bearer_token_env_var?: string;
+  auth?: UpstreamAuthConfig;
   tool_prefix?: string;
   expose: UpstreamExposeMode;
   tools?: string[];
+  disabled_tools?: string[];
   idle_timeout_sec?: number;
 }
 
@@ -64,9 +74,15 @@ function normalizeServer(raw: UpstreamServerConfig): UpstreamServerConfig {
     env: raw.env ?? {},
     cwd: raw.cwd?.trim(),
     url: raw.url?.trim(),
+    headers: raw.headers ?? {},
+    bearer_token_env_var: raw.bearer_token_env_var?.trim(),
+    auth: raw.auth ?? { type: transport === "http" ? "auto" : "none" },
     tool_prefix: (raw.tool_prefix?.trim() || id).replace(/[^a-zA-Z0-9_-]/g, "_"),
-    expose: raw.expose ?? "meta_only",
+    // New servers expose all tools by default, but an explicit allowlist or
+    // meta-only setting remains a security boundary.
+    expose: raw.expose ?? (raw.enabled === false ? "none" : "all"),
     tools: raw.tools ?? [],
+    disabled_tools: raw.disabled_tools ?? [],
     idle_timeout_sec: raw.idle_timeout_sec ?? 600,
   };
 }
@@ -114,6 +130,8 @@ export interface McpServersEntry {
   type?: string;
   transport?: string;
   headers?: Record<string, string>;
+  bearer_token_env_var?: string;
+  auth?: UpstreamAuthConfig;
   enabled?: boolean;
 }
 
@@ -175,7 +193,10 @@ function entryToServer(id: string, entry: McpServersEntry, enabledDefault = fals
     env: Object.keys(env).length ? env : undefined,
     cwd: entry.cwd,
     url: entry.url,
-    expose: "meta_only",
+    headers: entry.headers,
+    bearer_token_env_var: entry.bearer_token_env_var,
+    auth: entry.auth,
+    expose: entry.enabled === false ? "none" : "all",
     tools: [],
   });
 }
@@ -220,6 +241,8 @@ export interface OpenCodeMcpEntry {
   cwd?: string;
   environment?: Record<string, string>;
   headers?: Record<string, string>;
+  bearer_token_env_var?: string;
+  auth?: UpstreamAuthConfig;
   enabled?: boolean;
 }
 
@@ -238,6 +261,9 @@ export function parseOpenCodeConfig(raw: OpenCodeConfigFile, enabledDefault = fa
       url: entry.url,
       cwd: entry.cwd,
       environment: entry.environment,
+      headers: entry.headers,
+      bearer_token_env_var: entry.bearer_token_env_var,
+      auth: entry.auth,
       enabled: entry.enabled,
     };
     const server = entryToServer(id, mapped, enabledDefault);

@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 
@@ -11,6 +12,7 @@ import {
   type UpstreamServerConfig,
   resolveUpstreamConfigPath,
 } from "./mcp-upstream-config.js";
+import { FileOAuthClientProvider } from "./mcp-oauth-provider.js";
 
 export type UpstreamHealth = "unknown" | "connected" | "reachable" | "unreachable" | "disabled";
 
@@ -19,6 +21,7 @@ export interface UpstreamServerStatus {
   name: string;
   enabled: boolean;
   transport: string;
+  auth: string;
   health: UpstreamHealth;
   connected: boolean;
   tool_count: number;
@@ -45,9 +48,12 @@ export class McpUpstreamManager {
   private config: UpstreamConfigFile;
   private configPath: string;
   private connections = new Map<string, UpstreamConnection>();
+  private connecting = new Map<string, Promise<UpstreamConnection>>();
   private servers = new Set<McpServer>();
   private toolsCache = new Map<string, { tools: Tool[]; expiresAt: number }>();
+  private oauthProviders = new Map<string, FileOAuthClientProvider>();
   private readonly toolsCacheTtlMs = 60_000;
+  private readonly connectTimeoutMs = Math.max(1_000, Number(process.env.MCP_UPSTREAM_CONNECT_TIMEOUT_MS) || 15_000);
 
   constructor(configPath = resolveUpstreamConfigPath()) {
     this.configPath = configPath;
@@ -83,15 +89,18 @@ export class McpUpstreamManager {
   }
 
   async reloadConfig(): Promise<UpstreamConfigFile> {
+    await this.shutdown();
     this.config = await loadUpstreamConfig(this.configPath);
+    this.oauthProviders.clear();
     await this.refreshAllProxies();
     return this.config;
   }
 
   async updateConfig(next: UpstreamConfigFile): Promise<UpstreamConfigFile> {
     await saveUpstreamConfig(next, this.configPath);
+    await this.shutdown();
     this.config = next;
-    await this.disconnectDisabled();
+    this.oauthProviders.clear();
     await this.refreshAllProxies();
     return this.config;
   }
@@ -137,6 +146,79 @@ export class McpUpstreamManager {
     this.scheduleIdleDisconnect(conn.config.id, conn);
   }
 
+  private shouldUseOAuth(config: UpstreamServerConfig): boolean {
+    if (config.transport !== "http") return false;
+    const mode = config.auth?.type ?? "auto";
+    if (mode === "none") return false;
+    if (mode === "oauth") return true;
+    const hasHeaders = Object.keys(config.headers ?? {}).length > 0;
+    return !hasHeaders && !config.bearer_token_env_var;
+  }
+
+  private getOAuthProvider(config: UpstreamServerConfig): FileOAuthClientProvider {
+    let provider = this.oauthProviders.get(config.id);
+    if (!provider) {
+      provider = new FileOAuthClientProvider({
+        serverId: config.id,
+        scope: config.auth?.scope,
+        openBrowser: false,
+      });
+      this.oauthProviders.set(config.id, provider);
+    }
+    return provider;
+  }
+
+  async oauthStatus(serverId: string) {
+    const config = this.getServerConfig(serverId);
+    if (!config) throw new Error(`Unknown upstream server: ${serverId}`);
+    if (!this.shouldUseOAuth(config)) {
+      return { configured: false, connected: false, pending: false, auth: config.auth?.type ?? "none" };
+    }
+    return { ...(await this.getOAuthProvider(config).authorizationStatus()), auth: config.auth?.type ?? "auto" };
+  }
+
+  async startOAuth(serverId: string, resetTokens = true) {
+    const config = this.getServerConfig(serverId);
+    if (!config) throw new Error(`Unknown upstream server: ${serverId}`);
+    if (config.transport !== "http" || !config.url) throw new Error(`OAuth requires an HTTP upstream: ${serverId}`);
+    if (!this.shouldUseOAuth(config)) throw new Error(`OAuth is disabled or static auth is configured for ${serverId}`);
+
+    await this.disconnect(serverId);
+    const provider = this.getOAuthProvider(config);
+    await provider.beginAuthorization({ resetTokens });
+    const result = await auth(provider, { serverUrl: config.url, scope: config.auth?.scope });
+    const status = await provider.authorizationStatus();
+    return { ...status, result };
+  }
+
+  async finishOAuth(serverId: string, authorizationCode: string, state?: string) {
+    const config = this.getServerConfig(serverId);
+    if (!config) throw new Error(`Unknown upstream server: ${serverId}`);
+    if (config.transport !== "http" || !config.url) throw new Error(`OAuth requires an HTTP upstream: ${serverId}`);
+    const provider = this.getOAuthProvider(config);
+    if (!(await provider.verifyState(state))) throw new Error("OAuth state mismatch or expired authorization flow");
+
+    const result = await auth(provider, {
+      serverUrl: config.url,
+      authorizationCode,
+      scope: config.auth?.scope,
+    });
+    if (result !== "AUTHORIZED") throw new Error(`OAuth authorization did not complete for ${serverId}`);
+    await provider.completeAuthorization();
+    await this.disconnect(serverId);
+    return this.checkHealth(serverId);
+  }
+
+  async disconnectOAuth(serverId: string): Promise<void> {
+    const config = this.getServerConfig(serverId);
+    if (!config) throw new Error(`Unknown upstream server: ${serverId}`);
+    const provider = this.getOAuthProvider(config);
+    await provider.invalidateCredentials("tokens");
+    await provider.invalidateCredentials("verifier");
+    await provider.completeAuthorization();
+    await this.disconnect(serverId);
+  }
+
   private async createTransport(config: UpstreamServerConfig): Promise<{
     client: Client;
     transport: StdioClientTransport | StreamableHTTPClientTransport;
@@ -152,19 +234,69 @@ export class McpUpstreamManager {
         cwd: config.cwd,
         stderr: "pipe",
       });
-      await client.connect(transport);
+      await this.connectClient(client, transport, config.id);
       return { client, transport, pid: transport.pid };
     }
 
-    const transport = new StreamableHTTPClientTransport(new URL(config.url!));
-    await client.connect(transport);
+    const headers: Record<string, string> = { ...(config.headers ?? {}) };
+    const bearerEnv = config.bearer_token_env_var?.trim();
+    if (bearerEnv) {
+      const token = process.env[bearerEnv]?.trim();
+      if (!token) throw new Error(`Missing bearer token environment variable for ${config.id}: ${bearerEnv}`);
+      if (!headers.Authorization && !headers.authorization) headers.Authorization = `Bearer ${token}`;
+    }
+
+    const transport = new StreamableHTTPClientTransport(new URL(config.url!), {
+      authProvider: this.shouldUseOAuth(config) ? this.getOAuthProvider(config) : undefined,
+      requestInit: Object.keys(headers).length ? { headers } : undefined,
+    });
+    await this.connectClient(client, transport, config.id);
     return { client, transport, pid: null };
+  }
+
+  private async withConnectTimeout<T>(operation: Promise<T>, serverId: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`Upstream connection timed out after ${this.connectTimeoutMs}ms: ${serverId}`)),
+            this.connectTimeoutMs
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async connectClient(
+    client: Client,
+    transport: StdioClientTransport | StreamableHTTPClientTransport,
+    serverId: string
+  ): Promise<void> {
+    try {
+      await this.withConnectTimeout(client.connect(transport), serverId);
+    } catch (error) {
+      await transport.close().catch(() => undefined);
+      throw error;
+    }
   }
 
   async connect(serverId: string, force = false): Promise<UpstreamConnection> {
     const config = this.getServerConfig(serverId);
     if (!config) throw new Error(`Unknown upstream server: ${serverId}`);
     if (!config.enabled) throw new Error(`Upstream server disabled: ${serverId}`);
+
+    const pending = this.connecting.get(serverId);
+    if (pending) {
+      const connection = await pending;
+      if (!force) {
+        this.touch(connection);
+        return connection;
+      }
+    }
 
     const existing = this.connections.get(serverId);
     if (existing && existing.connected && !force) {
@@ -174,28 +306,40 @@ export class McpUpstreamManager {
 
     if (existing) await this.disconnect(serverId);
 
-    const { client, transport, pid } = await this.createTransport(config);
-    const list = await client.listTools();
-    const tools = list.tools ?? [];
+    const attempt = (async (): Promise<UpstreamConnection> => {
+      const { client, transport, pid } = await this.withConnectTimeout(this.createTransport(config), serverId);
+      try {
+        const list = await this.withConnectTimeout(client.listTools(), serverId);
+        const tools = list.tools ?? [];
+        const conn: UpstreamConnection = {
+          config,
+          client,
+          transport,
+          tools,
+          lastUsedAt: Date.now(),
+          idleTimer: null,
+          connected: true,
+          lastError: undefined,
+        };
+        if (config.transport === "stdio" && pid) {
+          (conn as UpstreamConnection & { pid?: number }).pid = pid;
+        }
 
-    const conn: UpstreamConnection = {
-      config,
-      client,
-      transport,
-      tools,
-      lastUsedAt: Date.now(),
-      idleTimer: null,
-      connected: true,
-      lastError: undefined,
-    };
-    if (config.transport === "stdio" && pid) {
-      (conn as UpstreamConnection & { pid?: number }).pid = pid;
+        this.connections.set(serverId, conn);
+        this.toolsCache.set(serverId, { tools, expiresAt: Date.now() + this.toolsCacheTtlMs });
+        this.touch(conn);
+        return conn;
+      } catch (error) {
+        await transport.close().catch(() => undefined);
+        throw error;
+      }
+    })();
+    this.connecting.set(serverId, attempt);
+    try {
+      return await attempt;
+    } finally {
+      if (this.connecting.get(serverId) === attempt) this.connecting.delete(serverId);
     }
-
-    this.connections.set(serverId, conn);
-    this.toolsCache.set(serverId, { tools, expiresAt: Date.now() + this.toolsCacheTtlMs });
-    this.touch(conn);
-    return conn;
   }
 
   async disconnect(serverId: string): Promise<void> {
@@ -252,11 +396,7 @@ export class McpUpstreamManager {
   }
 
   async listStatuses(): Promise<UpstreamServerStatus[]> {
-    const statuses: UpstreamServerStatus[] = [];
-    for (const config of this.config.servers) {
-      statuses.push(await this.checkHealth(config.id));
-    }
-    return statuses;
+    return Promise.all(this.config.servers.map((config) => this.checkHealth(config.id)));
   }
 
   private buildStatus(
@@ -273,6 +413,7 @@ export class McpUpstreamManager {
       name: config.name,
       enabled: config.enabled,
       transport: config.transport,
+      auth: config.transport !== "http" ? "none" : this.shouldUseOAuth(config) ? "oauth" : (Object.keys(config.headers ?? {}).length || config.bearer_token_env_var) ? "static" : "none",
       health,
       connected,
       tool_count: tools.length,
@@ -286,10 +427,10 @@ export class McpUpstreamManager {
   getProxiedToolNames(config: UpstreamServerConfig, tools: Tool[]): string[] {
     if (!config.enabled || config.expose === "none" || config.expose === "meta_only") return [];
     const prefix = `${config.tool_prefix ?? config.id}__`;
-    const names = tools.map((t) => t.name);
-    if (config.expose === "all") return names.map((n) => `${prefix}${n}`);
-    const allow = new Set(config.tools ?? []);
-    return names.filter((n) => allow.has(n)).map((n) => `${prefix}${n}`);
+    return tools
+      .filter((tool) => !(config.disabled_tools ?? []).includes(tool.name))
+      .filter((tool) => config.expose === "all" || (config.tools ?? []).includes(tool.name))
+      .map((tool) => `${prefix}${tool.name}`);
   }
 
   async refreshAllProxies(): Promise<void> {

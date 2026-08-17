@@ -22,8 +22,40 @@ export interface AdminServerOptions {
 export function startAdminServer(options: AdminServerOptions): Server {
   const host = options.host ?? "127.0.0.1";
   const app = express();
+  const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[char]!);
   app.use(express.json({ limit: "5mb" }));
   app.use(localhostOnly);
+
+  // OAuth callbacks must not require ADMIN_TOKEN: OAuth providers redirect the browser here.
+  // The route is still loopback-only and protected by the per-flow OAuth state value.
+  app.get("/oauth/callback/:id", async (req, res) => {
+    const code = typeof req.query.code === "string" ? req.query.code : undefined;
+    const state = typeof req.query.state === "string" ? req.query.state : undefined;
+    const error = typeof req.query.error === "string" ? req.query.error : undefined;
+    const errorDescription = typeof req.query.error_description === "string" ? req.query.error_description : undefined;
+    if (error) {
+      res.status(400).send(`<h2>OAuth failed</h2><p>${escapeHtml(errorDescription || error)}</p><p>You can close this tab.</p>`);
+      return;
+    }
+    if (!code) {
+      res.status(400).send("<h2>OAuth failed</h2><p>Missing authorization code.</p>");
+      return;
+    }
+    try {
+      const status = await options.manager.finishOAuth(req.params.id, code, state);
+      res.send(`<h2>OAuth connected</h2><p>${escapeHtml(req.params.id)}: ${status.tool_count} tools available.</p><p>You can close this tab.</p>`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(400).send(`<h2>OAuth failed</h2><pre>${escapeHtml(message)}</pre><p>You can close this tab.</p>`);
+    }
+  });
+
   app.use(adminAuth);
 
   const uiDir = path.resolve(__dirname, "../../public/ui");

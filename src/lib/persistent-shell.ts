@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import fs from "fs";
 import path from "path";
 
 export interface ShellExecResult {
@@ -109,11 +110,115 @@ export function applyCwdDirectives(currentCwd: string, command: string): { cwd: 
   return { cwd, command: rest || "pwd" };
 }
 
+export function transpileCompoundOperators(cmd: string): string {
+  if (!cmd.includes("&&") && !cmd.includes("||")) return cmd;
+
+  const tokens: { type: "text" | "&&" | "||"; value: string }[] = [];
+  let current = "";
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let i = 0;
+
+  while (i < cmd.length) {
+    const char = cmd[i];
+    const nextChar = cmd[i + 1];
+
+    if (char === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote;
+      current += char;
+      i++;
+    } else if (char === '"' && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote;
+      current += char;
+      i++;
+    } else if (!inSingleQuote && !inDoubleQuote && char === "&" && nextChar === "&") {
+      if (current.trim()) tokens.push({ type: "text", value: current.trim() });
+      tokens.push({ type: "&&", value: "&&" });
+      current = "";
+      i += 2;
+    } else if (!inSingleQuote && !inDoubleQuote && char === "|" && nextChar === "|") {
+      if (current.trim()) tokens.push({ type: "text", value: current.trim() });
+      tokens.push({ type: "||", value: "||" });
+      current = "";
+      i += 2;
+    } else {
+      current += char;
+      i++;
+    }
+  }
+
+  if (current.trim()) tokens.push({ type: "text", value: current.trim() });
+  if (tokens.length <= 1) return cmd;
+
+  let result = `${tokens[0].value}; $__localCoderSuccess = $?`;
+
+  for (let j = 1; j < tokens.length; j += 2) {
+    const op = tokens[j];
+    const nextCmd = tokens[j + 1]?.value;
+    if (!nextCmd) break;
+
+    if (op.type === "&&") {
+      result += `; if ($__localCoderSuccess) { ${nextCmd}; $__localCoderSuccess = $? }`;
+    } else if (op.type === "||") {
+      result += `; if (-not $__localCoderSuccess) { ${nextCmd}; $__localCoderSuccess = $? }`;
+    }
+  }
+
+  return result;
+}
+
+export function getWinShell(): { shell: string; isPwsh: boolean } {
+  const configuredShell = process.env.SHELL?.trim();
+  if (configuredShell && /(?:^|[\\/])(pwsh|powershell)(?:\.exe)?$/i.test(configuredShell)) {
+    return { shell: configuredShell, isPwsh: /pwsh(?:\.exe)?$/i.test(configuredShell) };
+  }
+
+  const pwshPaths = [
+    "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+    "C:\\Program Files (x86)\\PowerShell\\7\\pwsh.exe",
+  ];
+  for (const p of pwshPaths) {
+    if (fs.existsSync(p)) return { shell: p, isPwsh: true };
+  }
+
+  const sysPowerShell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+  if (fs.existsSync(sysPowerShell)) return { shell: sysPowerShell, isPwsh: false };
+
+  return { shell: "powershell.exe", isPwsh: false };
+}
+
 function runOnce(command: string, cwd: string, timeoutMs: number): Promise<ShellExecResult> {
   return new Promise((resolve, reject) => {
-    const shell = process.platform === "win32" ? "powershell.exe" : "bash";
-    const args = process.platform === "win32" ? ["-NoProfile", "-Command", command] : ["-lc", command];
-    const child = spawn(shell, args, { cwd, windowsHide: true, env: process.env });
+    let effectiveCommand = command;
+    let shell = "bash";
+    let args: string[] = ["-lc", effectiveCommand];
+
+    if (process.platform === "win32") {
+      const winShellInfo = getWinShell();
+      shell = winShellInfo.shell;
+      if (!winShellInfo.isPwsh) {
+        effectiveCommand = transpileCompoundOperators(command);
+      }
+      args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", effectiveCommand];
+    }
+
+    const child = spawn(shell, args, {
+      cwd,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        CI: "true",
+        PAGER: "cat",
+        GIT_PAGER: "cat",
+        NO_COLOR: "1",
+        npm_config_yes: "true",
+      },
+    });
+
+    if (child.stdin) {
+      child.stdin.end();
+    }
+
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -123,8 +228,8 @@ function runOnce(command: string, cwd: string, timeoutMs: number): Promise<Shell
       child.kill();
     }, timeoutMs);
 
-    child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
-    child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
+    child.stdout?.on("data", (d: Buffer) => (stdout += d.toString()));
+    child.stderr?.on("data", (d: Buffer) => (stderr += d.toString()));
     child.on("close", (code) => {
       clearTimeout(timer);
       if (timedOut) {

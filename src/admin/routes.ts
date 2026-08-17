@@ -12,6 +12,8 @@ import {
 } from "../lib/mcp-upstream-config.js";
 import { getDefaultCwd, getFullDiskAccess } from "../lib/path-security.js";
 import { getCheckpointConfig } from "../lib/checkpoint.js";
+import { getLocalPluginsConfig, saveLocalPluginsConfig } from "../lib/plugin-config.js";
+import { getCodexHooks, saveCodexHooks } from "../lib/codex-hooks.js";
 import {
   getRecentActivity,
   loadAuditHistory,
@@ -138,6 +140,65 @@ export function createAdminRouter(manager: McpUpstreamManager, options: {
     res.json({ ok: true, config: manager.getConfig(), path: manager.getConfigPath() });
   });
 
+  router.get("/api/plugins", (_req, res) => {
+    res.json({ ok: true, config: getLocalPluginsConfig(), available: { computer_use: process.platform === "win32" } });
+  });
+
+  router.put("/api/plugins", (req, res) => {
+    const computerUseEnabled = req.body?.config?.computer_use?.enabled === true;
+    const next = { computer_use: { enabled: computerUseEnabled } };
+    saveLocalPluginsConfig(next);
+    res.json({ ok: true, config: next, restart_required: "Open a new ChatGPT MCP session after changing plugin state." });
+  });
+
+  router.get("/api/codex-hooks", async (_req, res) => {
+    try {
+      res.json({ ok: true, hooks: await getCodexHooks() });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.put("/api/codex-hooks", async (req, res) => {
+    try {
+      res.json({ ok: true, hooks: await saveCodexHooks(req.body?.enabled) });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.get("/api/local-tools", async (_req, res) => {
+    try {
+      const { LOCAL_TOOL_CATALOG } = await import("../lib/tool-profile.js");
+      const configPath = path.resolve(process.cwd(), "profiles", "tool-overrides.json");
+      let overrides: { enabled?: string[]; disabled?: string[] } = {};
+      try {
+        overrides = JSON.parse(await fs.readFile(configPath, "utf-8"));
+      } catch {}
+      res.json({ ok: true, tools: LOCAL_TOOL_CATALOG, overrides });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.put("/api/local-tools", async (req, res) => {
+    try {
+      const { LOCAL_TOOL_CATALOG } = await import("../lib/tool-profile.js");
+      const known = new Set(LOCAL_TOOL_CATALOG);
+      const names = (value: unknown) => Array.isArray(value)
+        ? [...new Set(value.filter((name): name is string => typeof name === "string" && known.has(name)))]
+        : [];
+      const enabled = names(req.body?.overrides?.enabled);
+      const disabled = names(req.body?.overrides?.disabled).filter((name) => !enabled.includes(name));
+      const configPath = path.resolve(process.cwd(), "profiles", "tool-overrides.json");
+      await fs.mkdir(path.dirname(configPath), { recursive: true });
+      await fs.writeFile(configPath, JSON.stringify({ enabled, disabled }, null, 2) + "\n", "utf-8");
+      res.json({ ok: true, overrides: { enabled, disabled }, restart_required: "Open a new ChatGPT MCP session after changing local tool visibility." });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   router.put("/api/upstream", async (req, res) => {
     try {
       const config = req.body?.config ?? defaultUpstreamConfig();
@@ -175,6 +236,32 @@ export function createAdminRouter(manager: McpUpstreamManager, options: {
     try {
       const status = await manager.checkHealth(req.params.id);
       res.json({ ok: status.health === "connected", status });
+    } catch (err) {
+      res.status(400).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.get("/api/upstream/:id/oauth/status", async (req, res) => {
+    try {
+      res.json({ ok: true, status: await manager.oauthStatus(req.params.id) });
+    } catch (err) {
+      res.status(400).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.post("/api/upstream/:id/oauth/start", async (req, res) => {
+    try {
+      const status = await manager.startOAuth(req.params.id, req.body?.reset !== false);
+      res.json({ ok: true, status });
+    } catch (err) {
+      res.status(400).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.post("/api/upstream/:id/oauth/disconnect", async (req, res) => {
+    try {
+      await manager.disconnectOAuth(req.params.id);
+      res.json({ ok: true, status: await manager.oauthStatus(req.params.id) });
     } catch (err) {
       res.status(400).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }

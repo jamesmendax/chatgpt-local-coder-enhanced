@@ -13,6 +13,7 @@ import { getUpstreamManager } from "../lib/mcp-upstream-manager.js";
 import { appendAutoMemory } from "../lib/auto-memory.js";
 import { loadPathRulesForFile } from "../lib/path-rules.js";
 import { toolResult } from "../lib/tool-result.js";
+import { loadProjectSkill, loadProjectSkills } from "../lib/skills-loader.js";
 
 
 
@@ -66,6 +67,38 @@ async function findContextFiles(root: string, maxDepth: number): Promise<string[
 }
 
 export function registerContextTools(server: McpServer, workspaceRoot: string): void {
+  server.registerTool(
+    "list_skills",
+    {
+      title: "List Skills",
+      description: "List project skills and their short activation descriptions. Read a matching skill with load_skill before following it.",
+      inputSchema: {},
+      annotations: toolAnnotations("read"),
+    },
+    async () => {
+      const skills = await loadProjectSkills(workspaceRoot);
+      return toolResult("list_skills", { skills, count: skills.length });
+    }
+  );
+
+  server.registerTool(
+    "load_skill",
+    {
+      title: "Load Skill",
+      description: "Load one skill's complete instructions. Computer Use includes its bundled guidance, API, and confirmation references.",
+      inputSchema: {
+        name: z.string().min(1).describe("Exact skill name returned by list_skills"),
+        max_bytes: z.number().int().positive().max(500000).optional().default(200000),
+      },
+      annotations: toolAnnotations("read"),
+    },
+    async ({ name, max_bytes }) => {
+      const loaded = await loadProjectSkill(workspaceRoot, name, max_bytes);
+      await audit({ tool: "load_skill", action: "read", target: loaded.skill.path, status: "ok" });
+      return toolResult("load_skill", loaded);
+    }
+  );
+
   server.registerTool(
     "project_context",
     {

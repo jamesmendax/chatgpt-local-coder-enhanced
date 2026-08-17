@@ -9,6 +9,8 @@ profiles/*
 !profiles/post-edit-hooks.json
 !profiles/chatgpt-connector-description.txt
 .mcp-state/
+.mcp-oauth/
+.codex-remote-attachments/
 .env
 terminals/
 agent-tools/

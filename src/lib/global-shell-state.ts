@@ -9,7 +9,9 @@ export interface GlobalShellState {
   recent_commands: string[];
 }
 
-const STATE_DIR = process.env.MCP_SHELL_STATE_DIR || path.join(process.cwd(), ".mcp-state");
+function getStateDir(): string {
+  return process.env.MCP_SHELL_STATE_DIR || path.join(process.cwd(), ".mcp-state");
+}
 const MAX_RECENT = 20;
 
 function workspaceKey(workspaceRoot: string): string {
@@ -17,7 +19,7 @@ function workspaceKey(workspaceRoot: string): string {
 }
 
 function statePath(workspaceRoot: string): string {
-  return path.join(STATE_DIR, `shell-${workspaceKey(workspaceRoot)}.json`);
+  return path.join(getStateDir(), `shell-${workspaceKey(workspaceRoot)}.json`);
 }
 
 export async function loadGlobalShellState(
@@ -53,7 +55,7 @@ export async function saveGlobalShellState(
     recent_commands: recent,
   };
 
-  await fs.mkdir(STATE_DIR, { recursive: true });
+  await fs.mkdir(getStateDir(), { recursive: true });
   await fs.writeFile(statePath(workspaceRoot), JSON.stringify(state, null, 2), "utf-8");
 }
 
