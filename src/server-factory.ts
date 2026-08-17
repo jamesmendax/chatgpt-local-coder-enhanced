@@ -7,6 +7,7 @@ import { registerContextTools } from "./tools/context.js";
 import { registerRewindTools } from "./tools/rewind.js";
 import { registerMcpBridgeTools } from "./tools/mcp-bridge.js";
 import { registerNodeReplTool } from "./tools/node-repl.js";
+import { registerPonytailTurnTool } from "./tools/ponytail.js";
 import { buildServerInstructions } from "./lib/quickstart.js";
 import type { McpUpstreamManager } from "./lib/mcp-upstream-manager.js";
 import { getChatGptToolProfile, shouldExposeTool } from "./lib/tool-profile.js";
@@ -81,6 +82,7 @@ export function createMcpServer(
   registerGitTools(server, workspaceRoot);
   registerContextTools(server, workspaceRoot);
   registerNodeReplTool(server, workspaceRoot);
+  registerPonytailTurnTool(server);
   registerRewindTools(server);
 
   if (upstreamManager) {

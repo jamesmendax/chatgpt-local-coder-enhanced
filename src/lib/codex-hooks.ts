@@ -133,7 +133,7 @@ export async function saveCodexHooks(enabledIds: unknown): Promise<CodexHook[]> 
   return getCodexHooks();
 }
 
-function execute(command: string, timeoutMs: number): Promise<string> {
+function execute(command: string, timeoutMs: number, input?: string): Promise<string> {
   const shell = process.platform === "win32" ? "powershell.exe" : "bash";
   const args = process.platform === "win32" ? ["-NoProfile", "-Command", command] : ["-lc", command];
   return new Promise((resolve) => {
@@ -155,6 +155,7 @@ function execute(command: string, timeoutMs: number): Promise<string> {
       clearTimeout(timer);
       resolve("");
     });
+    child.stdin.end(input);
   });
 }
 
@@ -171,6 +172,20 @@ function hookContext(output: string): string {
 
 export async function runCodexSessionStartHooks(): Promise<string> {
   const hooks = (await getCodexHooks()).filter((hook) => hook.enabled && hook.supported);
-  const output = await Promise.all(hooks.map(async (hook) => hookContext(await execute(hook.command, hook.timeout_ms))));
+  const ponytail = hooks.find((hook) => hook.plugin === "ponytail@ponytail" && hook.event === "session_start");
+  const output = await Promise.all(
+    hooks
+      .filter((hook) => hook !== ponytail)
+      .map(async (hook) => hookContext(await execute(hook.command, hook.timeout_ms)))
+  );
+  if (ponytail) {
+    output.push(
+      "Ponytail controller is enabled. Before responding to each new user message, call ponytail_turn with the user's exact prompt. Apply only the active_instructions returned for that turn; when it reports mode off, do not apply any earlier Ponytail instructions."
+    );
+  }
   return output.filter(Boolean).join("\n\n").slice(0, 120_000);
+}
+
+export async function runCodexHook(hook: Pick<CodexHook, "command" | "timeout_ms">, input?: string): Promise<string> {
+  return hookContext(await execute(hook.command, hook.timeout_ms, input));
 }
