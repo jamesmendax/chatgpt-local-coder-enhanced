@@ -11,6 +11,8 @@ import {
   execInShellSession,
   getShellStatus,
   resetShellSession,
+  getWinShell,
+  transpileCompoundOperators,
 } from "../lib/persistent-shell.js";
 
 interface ManagedProcess {
@@ -114,9 +116,30 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
     async ({ command, working_directory }) => {
       requireCommandAllowed(command);
       const cwd = working_directory ? await validatePath(working_directory) : getShellStatus().cwd || defaultCwd;
-      const shell = process.platform === "win32" ? "powershell.exe" : "bash";
-      const args = process.platform === "win32" ? ["-NoProfile", "-Command", command] : ["-lc", command];
-      const child = spawn(shell, args, { cwd, windowsHide: true, env: process.env });
+      let shell = "bash";
+      let effectiveCommand = command;
+      let args = ["-lc", effectiveCommand];
+
+      if (process.platform === "win32") {
+        const winShellInfo = getWinShell();
+        shell = winShellInfo.shell;
+        if (!winShellInfo.isPwsh) {
+          effectiveCommand = transpileCompoundOperators(command);
+        }
+        args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", effectiveCommand];
+      }
+
+      const child = spawn(shell, args, {
+        cwd,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          CI: "true",
+          PAGER: "cat",
+          GIT_PAGER: "cat",
+          NO_COLOR: "1",
+        },
+      });
       const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
       const item: ManagedProcess = {
         id,

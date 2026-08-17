@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 /**
  * Chuẩn output JSON cho mọi tool — ChatGPT dễ parse.
  *
@@ -11,6 +13,18 @@ export interface ToolResultPayload<T = Record<string, unknown>> {
   data: T;
   [key: string]: unknown;
 }
+
+/**
+ * Shared structured-output schema advertised by every native Local Coder tool.
+ * Individual tools intentionally keep `data` open because each tool has its own
+ * payload shape, while the outer envelope is stable across the whole server.
+ */
+export const TOOL_RESULT_OUTPUT_SCHEMA = {
+  ok: z.boolean().describe("Whether the tool operation succeeded"),
+  tool: z.string().describe("Local Coder tool name"),
+  summary: z.string().describe("Short human-readable result summary"),
+  data: z.record(z.string(), z.unknown()).describe("Tool-specific structured result payload"),
+};
 
 export function toolResult<T extends object>(
   tool: string,

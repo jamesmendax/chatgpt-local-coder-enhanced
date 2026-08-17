@@ -152,21 +152,16 @@
         <label class="field stdio-field span-2"><span>Args (JSON array)</span><input name="args" placeholder='["path/to/server.js"]' /></label>
         <label class="field stdio-field span-2"><span>Working directory</span><input name="cwd" /></label>
         <label class="field http-field span-2"><span>URL</span><input name="url" placeholder="http://127.0.0.1:3100/mcp" /></label>
-        <label class="field"><span>Tool prefix</span><input name="tool_prefix" /></label>
-        <label class="field"><span>Expose</span>
-          <select name="expose">
-            <option value="meta_only">meta_only</option>
-            <option value="allowlist">allowlist</option>
-            <option value="all">all</option>
-            <option value="none">none</option>
-          </select>
+        <label class="field http-field"><span>Auth</span>
+          <select name="auth_type"><option value="auto">auto (OAuth discovery)</option><option value="oauth">oauth</option><option value="none">none/static</option></select>
         </label>
+        <label class="field http-field"><span>OAuth scope (optional)</span><input name="oauth_scope" /></label>
+        <label class="field http-field"><span>Bearer token env</span><input name="bearer_token_env_var" placeholder="MY_MCP_TOKEN" /></label>
+        <label class="field http-field span-2"><span>Headers (JSON)</span><input name="headers" placeholder='{"X-API-Key":"..."}' /></label>
+        <label class="field"><span>Tool prefix</span><input name="tool_prefix" /></label>
+        <label class="field"><span>Expose</span><select name="expose"><option value="all">all</option><option value="allowlist">allowlist</option><option value="meta_only">meta_only</option><option value="none">none</option></select></label>
         <label class="field span-2"><span>Allowlist (phẩy)</span><input name="tools" placeholder="tool_a, tool_b" /></label>
         <label class="field"><span>Idle timeout (s)</span><input name="idle_timeout_sec" type="number" value="600" /></label>
-      </div>
-      <div id="tool-picker" class="tool-picker hidden">
-        <div class="tool-picker-head"><span>Tools từ upstream</span><button type="button" class="btn ghost sm" id="fetch-tools">Tải tools</button></div>
-        <div id="tool-chips" class="tool-chips"></div>
       </div>
       <menu class="modal-foot">
         <button type="button" class="btn ghost" value="cancel">Hủy</button>
@@ -174,6 +169,12 @@
       </menu>
     </form>
   </dialog>
+
+  <dialog id="computer-use-dialog" class="modal"><div class="modal-body"><div class="modal-head"><h3>Computer Use</h3><button type="button" class="btn icon" id="close-computer-use" aria-label="Close">×</button></div><p>Port từ plugin Codex: bật plugin sẽ expose skill <code>computer-use</code>. Agent phải load skill trước khi dùng <code>node_repl</code> và <code>globalThis.sky</code>.</p><label class="field checkbox"><input id="computer-use-enabled" type="checkbox" /><span>Bật Computer Use</span></label><menu class="modal-foot"><button type="button" class="btn primary" id="save-computer-use">Lưu</button></menu></div></dialog>
+
+  <dialog id="codex-hooks-dialog" class="modal"><div class="modal-body"><div class="modal-head"><h3>Codex hooks</h3><button type="button" class="btn icon" id="close-codex-hooks" aria-label="Close">×</button></div><p class="muted">Tự quét plugin đang bật trong Codex. Chỉ hook <code>SessionStart</code> có thể chạy trong ChatGPT MCP; prompt và subagent event được hiển thị nhưng không thể chạy.</p><div id="codex-hooks-list" class="tools-list"></div><menu class="modal-foot"><button type="button" class="btn primary" id="save-codex-hooks">Lưu</button></menu></div></dialog>
+
+  <dialog id="local-tools-dialog" class="modal"><div class="modal-body"><div class="modal-head"><h3>Local tools</h3><button type="button" class="btn icon" id="close-local-tools" aria-label="Close">×</button></div><p class="muted">Ép bật thêm tool ngoài profile <code>slim</code>, hoặc tắt bất kỳ tool local nào. Không áp dụng lên tool của MCP upstream.</p><div id="local-tools-list" class="tools-list"></div><menu class="modal-foot"><button type="button" class="btn primary" id="save-local-tools">Lưu</button></menu></div></dialog>
 
   <dialog id="tools-dialog" class="modal">
     <div class="modal-body">

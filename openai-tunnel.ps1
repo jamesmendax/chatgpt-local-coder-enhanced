@@ -1,4 +1,4 @@
-# OpenAI Secure MCP Tunnel — URL on dinh, khong doi moi lan chay (thay cloudflared)
+# OpenAI Secure MCP Tunnel - URL on dinh, khong doi moi lan chay (thay cloudflared)
 param(
     [int]$Port = 0,
     [int]$HealthPort = 0,
@@ -162,7 +162,7 @@ function Show-ConnectorGuide([string]$TunnelId, [int]$UiPort = 8080) {
 
 function Invoke-TunnelInit {
     Write-Host ""
-    Write-Host "=== OpenAI Tunnel — Cai dat lan dau ===" -ForegroundColor Cyan
+    Write-Host "=== OpenAI Tunnel - Cai dat lan dau ===" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Can 2 gia tri tu OpenAI Platform:" -ForegroundColor Yellow
     Write-Host "  Tunnels:  https://platform.openai.com/settings/organization/tunnels"
@@ -213,14 +213,14 @@ function Invoke-TunnelInit {
     Write-Host "Chay doctor..." -ForegroundColor Yellow
     & $bin doctor --profile-file $ProfileFile --explain
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "Doctor that bai — kiem tra tunnel_id, api key, va quyen Tunnels Read+Use" -ForegroundColor Red
+        Write-Host "Doctor that bai - kiem tra tunnel_id, api key, va quyen Tunnels Read+Use" -ForegroundColor Red
         exit 1
     }
 
     Write-Host ""
     Write-Host "Da luu vao .env. Lan sau chi can:" -ForegroundColor Green
     Write-Host "  .\start.ps1 -Force          # terminal 1"
-    Write-Host "  .\openai-tunnel.bat         # terminal 2"
+    Write-Host "  .\openai-tunnel.ps1         # terminal 2"
     Show-ConnectorGuide -TunnelId $tunnelId
 }
 
@@ -246,7 +246,7 @@ $apiKey = Get-DotEnvValue "OPENAI_TUNNEL_API_KEY"
 if (-not $tunnelId -or -not $apiKey) {
     Write-Host ""
     Write-Host "[CHUA CAU HINH] Chay setup lan dau:" -ForegroundColor Yellow
-    Write-Host "  .\openai-tunnel-init.bat" -ForegroundColor Cyan
+    Write-Host "  .\openai-tunnel.ps1 -Init" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Hoac them vao .env:" -ForegroundColor DarkGray
     Write-Host "  OPENAI_TUNNEL_ID=tunnel_..."
@@ -271,8 +271,8 @@ if ($existingPid -and (Test-TunnelHealthy $resolvedHealth)) {
     if (-not $Force) {
         Write-Host ""
         Write-Host "[OK] Tunnel DA CHAY san (PID $existingPid, port $resolvedHealth)" -ForegroundColor Green
-        Write-Host "Khong can mo lai — chi chay 1 instance tunnel-client." -ForegroundColor Yellow
-        Write-Host "Muon restart: .\openai-tunnel.bat -Force" -ForegroundColor DarkGray
+        Write-Host "Khong can mo lai - chi chay 1 instance tunnel-client." -ForegroundColor Yellow
+        Write-Host "Muon restart: .\openai-tunnel.ps1 -Force" -ForegroundColor DarkGray
         Write-Host "Hoac tat: Stop-Process -Id $existingPid -Force" -ForegroundColor DarkGray
         Show-ConnectorGuide -TunnelId $tunnelId -UiPort $resolvedHealth
         exit 0
@@ -310,7 +310,7 @@ Write-Host "Tunnel ID:  $tunnelId"
 Write-Host "MCP local:  $mcpUrl"
 Write-Host "Health UI:  http://127.0.0.1:$resolvedHealth/ui"
 Write-Host ""
-Write-Host "URL on dinh — khong doi moi lan chay (khac cloudflared)" -ForegroundColor Green
+Write-Host "URL on dinh - khong doi moi lan chay (khac cloudflared)" -ForegroundColor Green
 Write-Host "Nhan Ctrl+C de dung tunnel" -ForegroundColor DarkGray
 Write-Host ""
 

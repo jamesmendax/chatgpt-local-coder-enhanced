@@ -89,7 +89,7 @@ await run("save and load upstream config", async () => {
           enabled: true,
           transport: "http",
           url: "http://127.0.0.1:3999/mcp",
-          expose: "meta_only",
+          expose: "all",
         },
       ],
     },
@@ -163,8 +163,7 @@ try {
           enabled: true,
           transport: "http",
           url: `http://127.0.0.1:${httpPort}/mcp`,
-          expose: "allowlist",
-          tools: ["add"],
+          expose: "all",
           tool_prefix: "mockhttp",
         },
       ],
@@ -176,7 +175,7 @@ try {
     if (!text.includes("5")) throw new Error(text);
   });
 
-  await run("allowlist proxy registers prefixed tool", async () => {
+  await run("enabled upstream exposes all tools as prefixed direct tools", async () => {
     const manager = new McpUpstreamManager(configPath);
     await manager.init();
     await manager.updateConfig({
@@ -218,7 +217,7 @@ await run("manager connects to stdio mock upstream", async () => {
         transport: "stdio",
         command: process.execPath,
         args: [path.join(root, "scripts/mock-stdio-mcp.mjs")],
-        expose: "meta_only",
+        expose: "all",
       },
     ],
   });

@@ -6,10 +6,12 @@ import { registerGitTools } from "./tools/git.js";
 import { registerContextTools } from "./tools/context.js";
 import { registerRewindTools } from "./tools/rewind.js";
 import { registerMcpBridgeTools } from "./tools/mcp-bridge.js";
+import { registerNodeReplTool } from "./tools/node-repl.js";
+import { registerPonytailTurnTool } from "./tools/ponytail.js";
 import { buildServerInstructions } from "./lib/quickstart.js";
 import type { McpUpstreamManager } from "./lib/mcp-upstream-manager.js";
-import { refreshProxiedTools } from "./lib/mcp-tool-proxy.js";
 import { getChatGptToolProfile, shouldExposeTool } from "./lib/tool-profile.js";
+import { TOOL_RESULT_OUTPUT_SCHEMA } from "./lib/tool-result.js";
 
 const NOOP_TOOL = {
   remove: () => {},
@@ -20,14 +22,29 @@ const NOOP_TOOL = {
   enabled: false,
 } as unknown as RegisteredTool;
 
-function applyToolProfile(server: McpServer): void {
+function configureToolRegistration(server: McpServer): void {
   const profile = getChatGptToolProfile();
-  if (profile === "full") return;
-
   const original = server.registerTool.bind(server);
-  server.registerTool = ((name, ...rest) => {
-    if (!shouldExposeTool(String(name), profile)) return NOOP_TOOL;
-    return original(name, ...rest);
+  server.registerTool = ((name, config, callback) => {
+    const toolName = String(name);
+    const isUpstreamProxy = toolName.includes("__");
+
+    // Upstream MCP tools are namespaced as <server>__<tool>. An enabled
+    // upstream is always exposed directly, even when local tools use slim.
+    if (!isUpstreamProxy && profile !== "full" && !shouldExposeTool(toolName, profile)) {
+      return NOOP_TOOL;
+    }
+
+    // Every native Local Coder tool already returns the stable
+    // { ok, tool, summary, data } structuredContent envelope. Advertise that
+    // contract so MCP clients (including ChatGPT) can validate/use structured
+    // output instead of treating every result as opaque text.
+    const nextConfig =
+      !isUpstreamProxy && !config.outputSchema
+        ? { ...config, outputSchema: TOOL_RESULT_OUTPUT_SCHEMA }
+        : config;
+
+    return original(name, nextConfig as any, callback as any);
   }) as typeof server.registerTool;
 }
 
@@ -58,18 +75,19 @@ export function createMcpServer(
     }
   );
 
-  applyToolProfile(server);
+  configureToolRegistration(server);
 
   registerFilesystemTools(server);
   registerShellTools(server, workspaceRoot, shellTimeout);
   registerGitTools(server, workspaceRoot);
   registerContextTools(server, workspaceRoot);
+  registerNodeReplTool(server, workspaceRoot);
+  registerPonytailTurnTool(server);
   registerRewindTools(server);
 
   if (upstreamManager) {
     registerMcpBridgeTools(server, upstreamManager);
     upstreamManager.registerMcpServer(server);
-    void refreshProxiedTools(server, upstreamManager);
   }
 
   return server;

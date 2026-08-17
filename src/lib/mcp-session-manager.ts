@@ -9,6 +9,8 @@ import {
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpServer } from "../server-factory.js";
 import { getUpstreamManager } from "./mcp-upstream-manager.js";
+import { refreshProxiedTools } from "./mcp-tool-proxy.js";
+import { runCodexSessionStartHooks } from "./codex-hooks.js";
 
 
 const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
@@ -203,13 +205,17 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
   }
 
   async function buildSession(preferredSessionId?: string): Promise<McpSession> {
+    const hookInstructions = await runCodexSessionStartHooks().catch((error) => {
+      console.warn("[MCP] Codex SessionStart hook failed:", error);
+      return "";
+    });
     const mcpServer = createMcpServer(
       config.workspaceRoot,
       config.shellTimeout,
       config.workspaceRoots,
       true,
       getUpstreamManager(),
-      config.projectMemoryInstructions
+      [config.projectMemoryInstructions, hookInstructions].filter(Boolean).join("\n\n")
     );
 
     const transport = new StreamableHTTPServerTransport({
@@ -247,6 +253,11 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
     };
 
     await mcpServer.connect(transport);
+    // Native tools must be available immediately. Upstream discovery can spawn
+    // local processes or wait on remote MCPs, so publish it when ready instead.
+    void refreshProxiedTools(mcpServer, getUpstreamManager())
+      .then(() => mcpServer.sendToolListChanged())
+      .catch((error) => console.warn("[MCP] Upstream tool refresh failed:", error));
 
     const sid = transport.sessionId ?? preferredSessionId ?? randomUUID();
     return (

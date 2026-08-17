@@ -68,7 +68,8 @@ function esc(s) {
 }
 
 function serversTable(rows, { actions = true } = {}) {
-  if (!rows.length) return '<div class="empty">Chưa có upstream server. Thêm mới hoặc Import.</div>';
+  const controls = actions ? '<div class="btn-group" style="margin-bottom:12px"><button class="btn ghost" data-action="computer-use">Computer Use</button><button class="btn ghost" data-action="codex-hooks">Codex hooks</button><button class="btn ghost" data-action="local-tools">Local tools</button></div>' : '';
+  if (!rows.length) return controls + '<div class="empty">Chưa có upstream server. Thêm mới hoặc Import.</div>';
   const head = `<table><thead><tr>
     <th>Server</th><th>Transport</th><th>Status</th><th>Expose</th><th>Tools</th>
     ${actions ? "<th></th>" : ""}
@@ -79,6 +80,7 @@ function serversTable(rows, { actions = true } = {}) {
         ? `<td><div class="btn-group">
             <button class="btn sm ghost" data-action="test" data-id="${esc(s.id)}">Test</button>
             <button class="btn sm ghost" data-action="tools" data-id="${esc(s.id)}">Tools</button>
+            ${s.transport === "http" && s.auth === "oauth" ? `<button class="btn sm ghost" data-action="oauth" data-id="${esc(s.id)}">OAuth</button>` : ""}
             <button class="btn sm ghost" data-action="edit" data-id="${esc(s.id)}">Sửa</button>
             <button class="btn sm ghost" data-action="delete" data-id="${esc(s.id)}">Xóa</button>
           </div></td>`
@@ -93,7 +95,7 @@ function serversTable(rows, { actions = true } = {}) {
       </tr>`;
     })
     .join("");
-  return head + body + "</tbody></table>";
+  return controls + head + body + "</tbody></table>";
 }
 
 async function loadDashboard() {
@@ -146,6 +148,19 @@ function bindServerActions(container, config) {
           const r = await api(`/api/upstream/${id}/test`, { method: "POST" });
           toast(r.ok ? `OK — ${r.status.tool_count} tools` : r.status.last_error || "Failed", !r.ok);
           await loadServers();
+        } else if (action === "computer-use") {
+          await openComputerUseDialog();
+        } else if (action === "codex-hooks") {
+          const r = await api("/api/codex-hooks");
+          document.getElementById("codex-hooks-list").innerHTML = r.hooks.length
+            ? r.hooks.map((hook) => `<label class="field checkbox"><input type="checkbox" data-codex-hook="${esc(hook.id)}" ${hook.enabled ? "checked" : ""} ${hook.supported ? "" : "disabled"} /><span><strong>${esc(hook.plugin)}</strong> · ${esc(hook.event)}${hook.supported ? "" : " <small class=\"muted\">MCP không có event này</small>"}<br /><small class="muted">${esc(hook.command)}</small></span></label>`).join("")
+            : '<div class="muted">Không có hook Codex đã cài và bật.</div>';
+          document.getElementById("codex-hooks-dialog").showModal();
+        } else if (action === "oauth") {
+          const r = await api(`/api/upstream/${id}/oauth/start`, { method: "POST", body: JSON.stringify({ reset: true }) });
+          if (!r.status?.authorization_url) throw new Error("OAuth server did not return an authorization URL");
+          window.open(r.status.authorization_url, "_blank", "noopener");
+          toast(`OAuth started for ${id}`);
         } else if (action === "tools") {
           const r = await api(`/api/upstream/${id}/tools`);
           const list = document.getElementById("tools-list");
@@ -366,17 +381,14 @@ function transportFields(form) {
   const t = form.transport.value;
   form.querySelectorAll(".stdio-field").forEach((el) => el.classList.toggle("hidden", t !== "stdio"));
   form.querySelectorAll(".http-field").forEach((el) => el.classList.toggle("hidden", t !== "http"));
-  document.getElementById("tool-picker").classList.toggle("hidden", form.expose.value !== "allowlist");
 }
 
 serverForm.transport.addEventListener("change", () => transportFields(serverForm));
-serverForm.expose.addEventListener("change", () => transportFields(serverForm));
 
 function openServerDialog(server) {
   editingServerId = server?.id ?? null;
   serverForm.reset();
   document.getElementById("dialog-title").textContent = server ? "Sửa MCP Server" : "Thêm MCP Server";
-  document.getElementById("tool-chips").innerHTML = "";
   if (server) {
     serverForm.id.value = server.id;
     serverForm.id.readOnly = true;
@@ -387,8 +399,12 @@ function openServerDialog(server) {
     serverForm.args.value = JSON.stringify(server.args || []);
     serverForm.cwd.value = server.cwd || "";
     serverForm.url.value = server.url || "";
+    serverForm.auth_type.value = server.auth?.type || (server.transport === "http" ? "auto" : "none");
+    serverForm.oauth_scope.value = server.auth?.scope || "";
+    serverForm.bearer_token_env_var.value = server.bearer_token_env_var || "";
+    serverForm.headers.value = JSON.stringify(server.headers || {});
     serverForm.tool_prefix.value = server.tool_prefix || server.id;
-    serverForm.expose.value = server.expose || "meta_only";
+    serverForm.expose.value = server.expose || "all";
     serverForm.tools.value = (server.tools || []).join(", ");
     serverForm.idle_timeout_sec.value = server.idle_timeout_sec ?? 600;
   } else {
@@ -401,39 +417,20 @@ function openServerDialog(server) {
 document.getElementById("close-dialog").addEventListener("click", () => dialog.close());
 document.getElementById("close-tools").addEventListener("click", () => document.getElementById("tools-dialog").close());
 
-document.getElementById("fetch-tools").addEventListener("click", async () => {
-  const id = serverForm.id.value.trim();
-  if (!id) return toast("Nhập ID trước", true);
-  try {
-    const r = await api(`/api/upstream/${id}/tools`);
-    const selected = new Set(serverForm.tools.value.split(",").map((s) => s.trim()).filter(Boolean));
-    const chips = document.getElementById("tool-chips");
-    chips.innerHTML = r.tools
-      .map((t) => {
-        const on = selected.has(t.name) ? " on" : "";
-        return `<span class="chip${on}" data-tool="${esc(t.name)}">${esc(t.name)}</span>`;
-      })
-      .join("");
-    chips.querySelectorAll(".chip").forEach((chip) => {
-      chip.addEventListener("click", () => {
-        chip.classList.toggle("on");
-        const names = [...chips.querySelectorAll(".chip.on")].map((c) => c.dataset.tool);
-        serverForm.tools.value = names.join(", ");
-      });
-    });
-    toast(`${r.tools.length} tools`);
-  } catch (err) {
-    toast(err.message, true);
-  }
-});
-
 serverForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   let args = [];
+  let headers = {};
   try {
     args = serverForm.args.value.trim() ? JSON.parse(serverForm.args.value) : [];
   } catch {
     return toast("Args phải là JSON array hợp lệ", true);
+  }
+  try {
+    headers = serverForm.headers.value.trim() ? JSON.parse(serverForm.headers.value) : {};
+    if (!headers || Array.isArray(headers)) throw new Error();
+  } catch {
+    return toast("Headers phải là JSON object hợp lệ", true);
   }
   const server = {
     id: serverForm.id.value.trim(),
@@ -444,9 +441,15 @@ serverForm.addEventListener("submit", async (e) => {
     args,
     cwd: serverForm.cwd.value.trim() || undefined,
     url: serverForm.url.value.trim() || undefined,
+    headers: Object.keys(headers).length ? headers : undefined,
+    bearer_token_env_var: serverForm.bearer_token_env_var.value.trim() || undefined,
+    auth: serverForm.transport.value === "http" ? {
+      type: serverForm.auth_type.value || "auto",
+      ...(serverForm.oauth_scope.value.trim() ? { scope: serverForm.oauth_scope.value.trim() } : {}),
+    } : { type: "none" },
     tool_prefix: serverForm.tool_prefix.value.trim() || undefined,
     expose: serverForm.expose.value,
-    tools: serverForm.tools.value.split(",").map((s) => s.trim()).filter(Boolean),
+    tools: serverForm.tools.value.split(",").map((name) => name.trim()).filter(Boolean),
     idle_timeout_sec: Number(serverForm.idle_timeout_sec.value) || 600,
   };
   try {
@@ -457,6 +460,30 @@ serverForm.addEventListener("submit", async (e) => {
   } catch (err) {
     toast(err.message, true);
   }
+});
+
+async function openComputerUseDialog() {
+  const r = await api("/api/plugins");
+  document.getElementById("computer-use-enabled").checked = r.config.computer_use?.enabled === true;
+  document.getElementById("computer-use-dialog").showModal();
+}
+
+document.getElementById("close-computer-use").addEventListener("click", () => {
+  document.getElementById("computer-use-dialog").close();
+});
+document.getElementById("save-computer-use").addEventListener("click", async () => {
+  const enabled = document.getElementById("computer-use-enabled").checked;
+  await api("/api/plugins", { method: "PUT", body: JSON.stringify({ config: { computer_use: { enabled } } }) });
+  document.getElementById("computer-use-dialog").close();
+  toast(enabled ? "Computer Use đã bật. Mở chat MCP mới để skill xuất hiện." : "Computer Use đã tắt.");
+});
+
+document.getElementById("close-codex-hooks").addEventListener("click", () => document.getElementById("codex-hooks-dialog").close());
+document.getElementById("save-codex-hooks").addEventListener("click", async () => {
+  const enabled = [...document.querySelectorAll("[data-codex-hook]:checked")].map((input) => input.dataset.codexHook);
+  await api("/api/codex-hooks", { method: "PUT", body: JSON.stringify({ enabled }) });
+  document.getElementById("codex-hooks-dialog").close();
+  toast("Đã lưu. Hook SessionStart áp dụng ở chat MCP mới.");
 });
 
 document.querySelectorAll(".nav-item").forEach((btn) => {
@@ -525,3 +552,25 @@ async function refreshAll() {
 document.getElementById("refresh-all").addEventListener("click", () => refreshAll().catch((e) => toast(e.message, true)));
 
 refreshAll().catch((err) => toast(err.message, true));
+
+async function openLocalTools() {
+  const data = await api("/api/local-tools");
+  const enabled = new Set(data.overrides?.enabled || []);
+  const disabled = new Set(data.overrides?.disabled || []);
+  document.getElementById("local-tools-list").innerHTML = data.tools.map((name) => `<label class="field checkbox"><input type="checkbox" data-tool-enable="${esc(name)}" ${enabled.has(name) ? "checked" : ""} /><span>${esc(name)} <small class="muted">force enable</small></span><input type="checkbox" data-tool-disable="${esc(name)}" ${disabled.has(name) ? "checked" : ""} /><span>disable</span></label>`).join("");
+  document.getElementById("local-tools-dialog").showModal();
+}
+
+document.addEventListener("click", (event) => {
+  const button = event.target.closest('button[data-action="local-tools"]');
+  if (button) openLocalTools().catch((err) => toast(err.message, true));
+});
+
+document.getElementById("close-local-tools").addEventListener("click", () => document.getElementById("local-tools-dialog").close());
+document.getElementById("save-local-tools").addEventListener("click", async () => {
+  const enabled = [...document.querySelectorAll("[data-tool-enable]:checked")].map((input) => input.dataset.toolEnable);
+  const disabled = [...document.querySelectorAll("[data-tool-disable]:checked")].map((input) => input.dataset.toolDisable);
+  await api("/api/local-tools", { method: "PUT", body: JSON.stringify({ overrides: { enabled, disabled } }) });
+  document.getElementById("local-tools-dialog").close();
+  toast("Đã lưu. Mở chat MCP mới để áp dụng.");
+});

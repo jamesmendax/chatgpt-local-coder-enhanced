@@ -74,7 +74,7 @@ node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"  
 npm start
 ```
 
-> The `.bat` / `.ps1` scripts are **Windows-only**. On macOS/Linux use `npm start` and the shell tunnel commands below — everything else is cross-platform.
+> The `.ps1` scripts are **Windows-only**. On macOS/Linux use `npm start` and the shell tunnel commands below — everything else is cross-platform.
 
 Server runs at `http://127.0.0.1:3000` — health check: `http://127.0.0.1:3000/health`
 
@@ -140,10 +140,10 @@ Stable tunnel ID — connector URL never changes.
 .\start.ps1 -Force
 
 # Terminal 2 — first time only
-.\openai-tunnel-init.bat    # enter tunnel_id + Runtime API key from OpenAI Platform
+.\openai-tunnel.ps1 -Init    # enter tunnel_id + Runtime API key from OpenAI Platform
 
 # Every time after
-.\openai-tunnel.bat
+.\openai-tunnel.ps1
 ```
 
 Get credentials: [OpenAI Platform → Tunnels](https://platform.openai.com/settings/organization/tunnels)
@@ -158,9 +158,9 @@ Free, but URL changes on every restart (update connector each time).
 
 ```powershell
 # Windows — Terminal 1
-.\start.bat
+.\start.ps1
 # Terminal 2
-.\tunnel.bat    # copy https://….trycloudflare.com into connector URL
+.\tunnel.ps1    # copy https://….trycloudflare.com into connector URL
 ```
 
 ```bash
@@ -369,14 +369,14 @@ This server grants **full access to your machine** — files, shell, git. Only e
 | **Permission popup every call** | Settings → Apps → set connector to *Ask before important changes*. Don't use popup "Always allow". |
 | **Tool blocked by OpenAI safety** | Not a server bug. Retry with `run_command` (response may include `run_command_fallback`). Affects `git_push`, `git_checkout`, `delete_directory` occasionally. |
 | **`stream canceled`** in tunnel log | Server/tunnel restarted mid-session → refresh connector, new chat. |
-| **Tunnel URL keeps changing** | Switch to OpenAI Secure Tunnel (`openai-tunnel.bat`). |
+| **Tunnel URL keeps changing** | Switch to OpenAI Secure Tunnel (`openai-tunnel.ps1`). |
 | **Connector stuck "loading" forever when you click Create** | Make sure you are on the latest build (`npm run build`) — older builds deadlocked on the SSE stream and never answered `tools/list`. Also confirm the URL includes `/mcp/<MCP_TOKEN>`. |
 | **404 on the connector URL** | You omitted the token. Use `https://<tunnel>/mcp/<MCP_TOKEN>`, not `/mcp`. |
 | **cloudflared never prints "Registered tunnel connection"** | Network blocks port 7844. `--protocol http2` will not help (same port). Use Pinggy — Option C. |
 | **`EADDRINUSE` on 3001 at startup** | Something else owns the admin port (often Docker Desktop). Set `ADMIN_PORT=3011`. |
 | **`.env` changes seem ignored** | A shell variable of the same name overrides it. Check `env \| grep WORKSPACE_PATH`. |
 | **`npm test` fails with `spawn bash ENOENT`** | Stale `.mcp-state` from a previous run. `rm -rf .mcp-state` and re-run. |
-| **`.bat` / `.ps1` scripts do nothing on macOS** | They are Windows-only. Use `npm start` and the Option B/C shell commands. |
+| **`.ps1` scripts do nothing on macOS** | They are Windows-only. Use `npm start` and the Option B/C shell commands. |
 | **Access denied** | Wrong path or OS permissions on that file. |
 | **git not found** | Install [Git](https://git-scm.com). |
 
@@ -409,10 +409,10 @@ cd chatgpt-local-coder
 copy .env.example .env
 npm install && npm run build
 .\start.ps1                    # terminal 1
-.\openai-tunnel.bat            # terminal 2 (tunnel cố định)
+.\openai-tunnel.ps1            # terminal 2 (tunnel cố định)
 ```
 
-**macOS / Linux** — các file `.bat` / `.ps1` chỉ chạy trên Windows:
+**macOS / Linux** — các script `.ps1` chỉ chạy trên Windows:
 
 ```bash
 git clone https://github.com/hoangcoderr/chatgpt-local-coder.git

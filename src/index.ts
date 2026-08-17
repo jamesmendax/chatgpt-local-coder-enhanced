@@ -325,7 +325,7 @@ server.on("error", (err: NodeJS.ErrnoException) => {
     console.error(`\n[LOI] Port ${PORT} da co server khac dang chay!`);
     console.error("Chay lenh sau de tim process:");
     console.error(`  netstat -ano | findstr ":${PORT}"`);
-    console.error("Hoac dung: .\\stop.bat de tat server cu\n");
+    console.error("Hoac dung: .\\stop.ps1 de tat server cu\n");
   } else {
     console.error("\n[LOI] Khong the khoi dong server:", err.message, "\n");
   }
@@ -340,7 +340,7 @@ process.on("SIGINT", () => {
   server.close(() => process.exit(0));
 });
 
-// Tranh process tu tat khi stdin dong (Windows + .bat)
+// Tranh process tu tat khi stdin dong (Windows)
 if (process.stdin.isTTY) {
   process.stdin.resume();
 }
