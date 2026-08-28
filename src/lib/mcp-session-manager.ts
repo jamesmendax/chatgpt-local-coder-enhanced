@@ -21,9 +21,10 @@ function boundedIntEnv(name: string, fallback: number, min: number, max: number)
   return Math.min(Math.max(parsed, min), max);
 }
 
-const SESSION_TTL_MS = boundedIntEnv("MCP_SESSION_TTL_MS", 86_400_000, 60_000, 604_800_000); // 1m..7d
-const SESSION_CLEANUP_INTERVAL_MS = boundedIntEnv("MCP_SESSION_CLEANUP_MS", 300_000, 1_000, 3_600_000); // 1s..1h
+const SESSION_TTL_MS = boundedIntEnv("MCP_SESSION_TTL_MS", 300_000, 60_000, 604_800_000); // 1m..7d
+const SESSION_CLEANUP_INTERVAL_MS = boundedIntEnv("MCP_SESSION_CLEANUP_MS", 30_000, 1_000, 3_600_000); // 1s..1h
 const SESSION_DELETE_GRACE_MS = boundedIntEnv("MCP_SESSION_DELETE_GRACE_MS", 45_000, 0, 600_000); // 0..10m
+const SESSION_MAX_COUNT = boundedIntEnv("MCP_SESSION_MAX_COUNT", 32, 4, 512);
 
 const lastTransportErrors: Record<string, string> = {};
 const sessionOpChains = new Map<string, Promise<void>>();
@@ -161,7 +162,29 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
   const sessions: Record<string, McpSession> = {};
   const pendingRecoveries: Record<string, McpSession> = {};
   const deleteGraceTimers: Record<string, ReturnType<typeof setTimeout>> = {};
+  const activeRequestCounts = new Map<string, number>();
+  const initializingServers = new Set<McpServer>();
   let cleanupTimer: ReturnType<typeof setInterval> | null = null;
+
+  function beginSessionRequest(sessionId: string): void {
+    activeRequestCounts.set(sessionId, (activeRequestCounts.get(sessionId) ?? 0) + 1);
+  }
+
+  function endSessionRequest(sessionId: string): void {
+    const next = (activeRequestCounts.get(sessionId) ?? 1) - 1;
+    if (next > 0) activeRequestCounts.set(sessionId, next);
+    else activeRequestCounts.delete(sessionId);
+    enforceSessionLimit();
+  }
+
+  function isSessionBusy(sessionId: string): boolean {
+    const session = sessions[sessionId];
+    return (
+      (activeRequestCounts.get(sessionId) ?? 0) > 0 ||
+      sessionOpChains.has(sessionId) ||
+      Boolean(session && initializingServers.has(session.server))
+    );
+  }
 
   function touch(sessionId: string): void {
     cancelDeleteGrace(sessionId);
@@ -190,7 +213,7 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
     deleteGraceTimers[sessionId].unref?.();
   }
 
-  function removeSession(sessionId: string, reason: string): void {
+  function removeSession(sessionId: string, reason: string, closeTransport = false): void {
     cancelDeleteGrace(sessionId);
     const session = sessions[sessionId];
     if (!session) return;
@@ -198,11 +221,38 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
     delete sessions[sessionId];
     delete lastTransportErrors[sessionId];
     sessionOpChains.delete(sessionId);
+    activeRequestCounts.delete(sessionId);
+    initializingServers.delete(session.server);
+    if (closeTransport) void session.transport.close().catch(() => undefined);
     console.log(`[MCP] Session removed (${reason}): ${sessionId}`);
   }
 
-  function clearPendingRecovery(sessionId: string): void {
+  function clearPendingRecovery(sessionId: string, disposeReason?: string): void {
+    const pending = pendingRecoveries[sessionId];
+    if (!pending) return;
     delete pendingRecoveries[sessionId];
+    const active = sessions[sessionId];
+    if (disposeReason && (!active || active.server !== pending.server)) {
+      getUpstreamManager().unregisterMcpServer(pending.server);
+      initializingServers.delete(pending.server);
+      void pending.transport.close().catch(() => undefined);
+      console.log(`[MCP] Pending recovery disposed (${disposeReason}): ${sessionId}`);
+    }
+  }
+
+  function enforceSessionLimit(protectedSessionId?: string): void {
+    let count = Object.keys(sessions).length;
+    if (count <= SESSION_MAX_COUNT) return;
+
+    const candidates = Object.entries(sessions)
+      .filter(([sid]) => sid !== protectedSessionId && !isSessionBusy(sid))
+      .sort((a, b) => a[1].lastAccessedAt - b[1].lastAccessedAt);
+
+    for (const [sid] of candidates) {
+      if (count <= SESSION_MAX_COUNT) break;
+      removeSession(sid, `LRU cap ${SESSION_MAX_COUNT}`, true);
+      count--;
+    }
   }
 
   async function buildSession(preferredSessionId?: string): Promise<McpSession> {
@@ -233,10 +283,11 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
           createdAt: existing?.createdAt ?? Date.now(),
         };
         clearPendingRecovery(sid);
+        enforceSessionLimit(sid);
         console.log(`[MCP] Session initialized: ${sid}`);
       },
       onsessionclosed: (sid) => {
-        if (sid) scheduleDeleteGrace(sid);
+        if (sid && sessions[sid]) scheduleDeleteGrace(sid);
       },
     });
 
@@ -362,9 +413,17 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
 
       const sid = headerSessionId || session.transport.sessionId;
       const run = async () => {
-        await session.transport.handleRequest(req, res, body);
-        const activeSid = session.transport.sessionId;
-        if (activeSid) touch(activeSid);
+        initializingServers.add(session.server);
+        if (sid) beginSessionRequest(sid);
+        try {
+          await session.transport.handleRequest(req, res, body);
+          const activeSid = session.transport.sessionId;
+          if (activeSid) touch(activeSid);
+        } finally {
+          initializingServers.delete(session.server);
+          if (sid) endSessionRequest(sid);
+          else enforceSessionLimit();
+        }
       };
 
       if (sid) {
@@ -384,7 +443,12 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
         session.transport.sessionId || (req.headers["mcp-session-id"] as string | undefined);
       if (sid) touch(sid);
       const run = async () => {
-        await session.transport.handleRequest(req, res, body);
+        if (sid) beginSessionRequest(sid);
+        try {
+          await session.transport.handleRequest(req, res, body);
+        } finally {
+          if (sid) endSessionRequest(sid);
+        }
       };
       // GET mo SSE stream song lau: handleRequest chi resolve khi stream dong.
       // Neu day vao hang doi tuan tu, no giu khoa vinh vien va MOI POST sau do
@@ -418,8 +482,8 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
 
       const warmed = await warmUpRecoveredSession(staleSessionId, mcpPath, protocolVersion);
       if (!warmed) {
-        clearPendingRecovery(staleSessionId);
-        removeSession(staleSessionId, "recovery failed");
+        clearPendingRecovery(staleSessionId, "recovery failed before initialization");
+        removeSession(staleSessionId, "recovery failed", true);
         return false;
       }
 
@@ -434,7 +498,12 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
 
       const patchedReq = withSessionIdHeader(req, staleSessionId, protocolVersion);
       await enqueueSessionOp(staleSessionId, async () => {
-        await recovered.transport.handleRequest(patchedReq, res, body);
+        beginSessionRequest(staleSessionId);
+        try {
+          await recovered.transport.handleRequest(patchedReq, res, body);
+        } finally {
+          endSessionRequest(staleSessionId);
+        }
       });
       return true;
     },
@@ -444,14 +513,17 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
       cleanupTimer = setInterval(() => {
         const now = Date.now();
         for (const [sid, session] of Object.entries(sessions)) {
-          if (now - session.lastAccessedAt > SESSION_TTL_MS) {
-            void session.transport.close().catch(() => undefined);
-            removeSession(sid, "TTL expired");
+          if (now - session.lastAccessedAt > SESSION_TTL_MS && !isSessionBusy(sid)) {
+            removeSession(sid, "TTL expired", true);
           }
         }
-        for (const sid of Object.keys(pendingRecoveries)) {
-          if (!sessions[sid]) clearPendingRecovery(sid);
+        for (const [sid, pending] of Object.entries(pendingRecoveries)) {
+          const orphanAge = Math.max(SESSION_CLEANUP_INTERVAL_MS * 2, 60_000);
+          if (!sessions[sid] && now - pending.createdAt > orphanAge) {
+            clearPendingRecovery(sid, "orphaned recovery cleanup");
+          }
         }
+        enforceSessionLimit();
       }, SESSION_CLEANUP_INTERVAL_MS);
       cleanupTimer.unref?.();
     },

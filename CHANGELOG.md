@@ -6,6 +6,30 @@ All notable user-facing changes to ChatGPT Local Coder Enhanced are recorded her
 
 No unreleased changes yet.
 
+## 1.2.0 - 2026-08-28
+
+### Added
+
+- Bounded MCP session retention with a configurable LRU cap (`MCP_SESSION_MAX_COUNT`, default 32).
+- Active-request and initialization protection so in-flight MCP work is not evicted by TTL or LRU cleanup.
+- Integration coverage that creates more sessions than the configured cap, verifies the cap, and verifies stale-session auto-recovery after eviction.
+
+### Changed
+
+- Default idle session TTL is reduced from 24 hours to 5 minutes for ChatGPT web workloads that may initialize a new MCP session for individual tool calls.
+- Default session cleanup interval is reduced from 5 minutes to 30 seconds.
+- Expired and LRU-evicted sessions close their transports and unregister their per-session MCP servers so memory can be reclaimed promptly.
+- Session retention remains transparent to normal ChatGPT conversations: an expired/evicted MCP session ID is rebuilt on the next tool call through the existing recovery path.
+
+### Fixed
+
+- Prevented long-running ChatGPT web usage from retaining hundreds of per-session `McpServer` and transport objects and causing steadily increasing Node.js heap usage.
+- Fixed an orphaned recovery path where a failed pending recovery could leave its MCP server registered and strongly referenced.
+
+### Compatibility
+
+- No native tool names or input schemas changed in this release. Existing ChatGPT custom MCP apps do not need to be recreated or re-published solely for this update; restart the local MCP server after upgrading.
+
 ## 1.1.0 - 2026-08-28
 
 ### Added

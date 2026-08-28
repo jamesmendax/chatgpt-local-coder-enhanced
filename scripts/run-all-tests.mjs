@@ -77,6 +77,9 @@ const server = spawn(process.execPath, ["dist/index.js"], {
     PORT: String(mcpPort),
     ADMIN_PORT: String(adminPort),
     CHATGPT_TOOL_PROFILE: "slim",
+    MCP_SESSION_TTL_MS: "60000",
+    MCP_SESSION_CLEANUP_MS: "1000",
+    MCP_SESSION_MAX_COUNT: "8",
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -132,6 +135,49 @@ try {
   console.log(`OK  tools/list: ${tools.length} tools, ${Math.round(bytes / 1024)}KB`);
   if (tools.length > 30) console.warn(`WARN tools/list has ${tools.length} tools — consider slim profile`);
   if (!tools.some((t) => t.name === "apply_patch")) throw new Error("apply_patch missing");
+
+  // ChatGPT web may initialize a fresh MCP session for each tool call. Verify
+  // retained sessions stay bounded without breaking stale-session recovery.
+  const retentionSessions = [];
+  for (let i = 0; i < 12; i++) {
+    const res = await fetch(`http://127.0.0.1:${mcpPort}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 100 + i,
+        method: "initialize",
+        params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "retention-test", version: "1" } },
+      }),
+    });
+    const retentionSid = res.headers.get("mcp-session-id");
+    if (!res.ok || !retentionSid) throw new Error(`retention initialize ${i} failed: HTTP ${res.status}`);
+    retentionSessions.push(retentionSid);
+  }
+
+  const cappedHealth = await (await fetch(`http://127.0.0.1:${adminPort}/health`)).json();
+  if (cappedHealth.active_sessions > 8) {
+    throw new Error(`session cap failed: ${cappedHealth.active_sessions} active sessions`);
+  }
+  console.log(`OK  session cap: ${cappedHealth.active_sessions}/8 active`);
+
+  const staleSid = retentionSessions[0];
+  const recoveryRes = await fetch(`http://127.0.0.1:${mcpPort}/mcp`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+      "mcp-session-id": staleSid,
+      "mcp-protocol-version": "2025-03-26",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 200, method: "tools/list", params: {} }),
+  });
+  if (!recoveryRes.ok) throw new Error(`evicted session recovery failed: HTTP ${recoveryRes.status}`);
+  const recoveredHealth = await (await fetch(`http://127.0.0.1:${adminPort}/health`)).json();
+  if (recoveredHealth.active_sessions > 8) {
+    throw new Error(`session cap exceeded after recovery: ${recoveredHealth.active_sessions}`);
+  }
+  console.log("OK  evicted session auto-recovery stays within cap");
 
   process.env.PORT = String(mcpPort);
   await runNode("scripts/test-mcp-session.mjs", { PORT: String(mcpPort) });

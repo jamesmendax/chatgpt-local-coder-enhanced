@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-local-coder-enhanced",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Enhanced self-hosted MCP server for ChatGPT with local filesystem, shell, git, checkpoints, direct attachment saving, and verified binary-file capabilities.",
   "author": "hoangcoderr and contributors; enhanced fork maintained by jamesmendax",

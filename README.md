@@ -62,6 +62,7 @@ Highlights:
 - git status/diff/add/commit/restore plus additional git tools in `full`
 - automatic file checkpoints and `rewind`
 - MCP session recovery after reconnects/restarts
+- bounded MCP session retention with idle TTL, an LRU cap, and active-request protection to prevent ChatGPT web sessions from accumulating in RAM
 - local Admin UI and optional upstream MCP hub
 - OpenAI Secure MCP Tunnel helpers on Windows
 - optional Free/Business dual-tunnel launchers sharing one local MCP server
@@ -71,6 +72,8 @@ Highlights:
 **Active maintenance.** The repository is intended to remain deployable from a clean clone. User-facing changes are recorded in [CHANGELOG.md](CHANGELOG.md), automated verification runs in GitHub Actions, and bug reports or focused pull requests are welcome through GitHub Issues/PRs.
 
 Current tested baseline: **39 tools in `slim`** and **53 native tools in the full catalog**.
+
+Session retention defaults are tuned for ChatGPT web workloads: idle sessions expire after 5 minutes, cleanup runs every 30 seconds, and at most 32 retained sessions are kept by default. These values are configurable with `MCP_SESSION_TTL_MS`, `MCP_SESSION_CLEANUP_MS`, and `MCP_SESSION_MAX_COUNT`. Evicted or expired session IDs remain recoverable on the next tool call, so this retention policy does not expire the ChatGPT conversation itself.
 
 ## Requirements
 
