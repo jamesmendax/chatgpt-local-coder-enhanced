@@ -1,444 +1,326 @@
 <div align="center">
 
-# ChatGPT Local Coder
+<img src="icon.png" alt="ChatGPT Local Coder Enhanced" width="96">
 
-**Turn ChatGPT web into a local coding agent — files, shell, git, patches, 40+ MCP tools.**
+# ChatGPT Local Coder Enhanced
 
-[![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-6366f1?style=flat-square)](https://modelcontextprotocol.io)
-[![ChatGPT](https://img.shields.io/badge/ChatGPT-Developer%20Mode-10a37f?style=flat-square)](https://platform.openai.com/docs/guides/developer-mode)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178c6?style=flat-square)](https://www.typescriptlang.org/)
+**Self-hosted MCP server for ChatGPT with local files, shell, git, checkpoints, direct attachment saving, and verified binary-file transfer.**
+
+[![CI](https://github.com/jamesmendax/chatgpt-local-coder-enhanced/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesmendax/chatgpt-local-coder-enhanced/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Windows](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-0078d4?style=flat-square)](https://nodejs.org)
-
-[Quick Start](#-quick-start) · [Connect ChatGPT](#-connect-chatgpt) · [Tools](#-tools) · [Tunnel](#-tunnel-options) · [Troubleshooting](#-troubleshooting) · [Tiếng Việt](#-tiếng-việt)
+[![Node.js](https://img.shields.io/badge/Node.js-20%2B-43853d?style=flat-square)](https://nodejs.org/)
+[![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-6366f1?style=flat-square)](https://modelcontextprotocol.io/)
+[![Maintenance](https://img.shields.io/badge/maintenance-active-brightgreen?style=flat-square)](CHANGELOG.md)
+[![Last commit](https://img.shields.io/github/last-commit/jamesmendax/chatgpt-local-coder-enhanced?style=flat-square)](https://github.com/jamesmendax/chatgpt-local-coder-enhanced/commits/main)
 
 </div>
 
----
+> [!WARNING]
+> This server can read and write local files and execute shell commands. Treat the MCP endpoint as privileged remote access to your computer. Read [SECURITY.md](SECURITY.md) before exposing it through any tunnel.
 
-ChatGPT Local Coder is a **self-hosted MCP server** that gives ChatGPT (and any MCP client) full access to your machine — read and edit code, run `npm test`, manage git, apply unified diffs, and explore projects with `glob` / `grep`.
+## About this fork
 
-No desktop app. No vendor lock-in. Run one Node process on your PC, expose it through a tunnel, and code from ChatGPT in the browser.
+This repository is the enhanced fork maintained by [@jamesmendax](https://github.com/jamesmendax) at [`jamesmendax/chatgpt-local-coder-enhanced`](https://github.com/jamesmendax/chatgpt-local-coder-enhanced). It is based on [`hoangcoderr/chatgpt-local-coder`](https://github.com/hoangcoderr/chatgpt-local-coder) and remains MIT licensed.
 
+The enhanced branch adds and hardens direct ChatGPT attachment saving, ChatGPT web tool profiles, MCP session recovery, checkpoint/rewind support, verified binary-file transfer, file inspection, Windows dual-tunnel launchers, and additional integration tests. See [NOTICE.md](NOTICE.md) and [CHANGELOG.md](CHANGELOG.md).
+
+## What it does
+
+```text
+ChatGPT Web
+    |
+    | HTTPS / Secure MCP Tunnel
+    v
++---------------------------+
+| ChatGPT Local Coder       |
+| MCP server on localhost   |
++-------------+-------------+
+              |
+       +------+------+----------------+
+       |             |                 |
+       v             v                 v
+   Filesystem      Shell + Git     Checkpoints
+   text/binary     commands        rewind
+       |
+       v
+ verified binary transfer
+ .part -> size/SHA256 -> final file
 ```
-┌─────────────────┐     HTTPS      ┌──────────────────┐     localhost     ┌─────────────────────┐
-│   ChatGPT Web   │ ─────────────► │  Tunnel (opt.)   │ ────────────────► │  chatgpt-local-coder │
-│ Developer Mode  │                │ OpenAI / CF      │      :3000/mcp    │  40+ MCP tools       │
-└─────────────────┘                └──────────────────┘                   └──────────┬──────────┘
-                                                                                    │
-                                         ┌──────────────────────────────────────────┼──────────┐
-                                         ▼                    ▼                    ▼          ▼
-                                   Filesystem              Shell + Git         Background    Project
-                                   read/write/patch        status/diff/commit   processes     context
-```
 
-## ✨ Why this project
+Current automated tests verify **53 statically registered native tools**. The default `slim` profile exposes **39** tools to keep ChatGPT's `tools/list` payload smaller; `full` exposes all native tools.
 
-| | ChatGPT alone | **+ ChatGPT Local Coder** |
-|---|---|---|
-| Edit your repo | ❌ | ✅ `apply_patch`, `edit_file`, `multi_edit` |
-| Run tests / builds | ❌ | ✅ `run_command`, `start_process` |
-| Git workflow | ❌ | ✅ `git_status`, `git_commit`, `git_push`, … |
-| Explore codebase | Limited | ✅ `glob`, `grep`, `list_directory` |
-| Full disk access | ❌ | ✅ Any path on your machine |
-| Session recovery | — | ✅ Auto-recover after server restart |
+Highlights:
 
-Built for **[ChatGPT Developer Mode](https://platform.openai.com/docs/guides/developer-mode)** with optimized tool annotations (fewer permission popups) and **[OpenAI Secure MCP Tunnel](https://platform.openai.com/docs/guides/secure-mcp-tunnel)** support (stable URL, no connector re-wiring every restart).
+- text file read/write/edit, glob, grep, directory listing, patch application
+- direct ChatGPT conversation-attachment saving with `save_chatgpt_file` without Base64-copying the whole file through the model
+- streaming download to `<target>.part` with SHA256 and size validation before finalization
+- binary file read/write with chunk offsets for generic MCP transfers
+- safe staged Base64 writes using `<target>.part`
+- optional `expected_size` and streaming SHA256 validation before finalization
+- `file_info` for size, timestamps, SHA256, and magic-byte inspection
+- persistent local shell, background processes, and Node REPL
+- git status/diff/add/commit/restore plus additional git tools in `full`
+- automatic file checkpoints and `rewind`
+- MCP session recovery after reconnects/restarts
+- local Admin UI and optional upstream MCP hub
+- OpenAI Secure MCP Tunnel helpers on Windows
+- optional Free/Business dual-tunnel launchers sharing one local MCP server
 
-## 🚀 Quick Start
+## Project status
 
-**Requirements:** [Node.js](https://nodejs.org) 18+, npm, Git (optional, for git tools)
+**Active maintenance.** The repository is intended to remain deployable from a clean clone. User-facing changes are recorded in [CHANGELOG.md](CHANGELOG.md), automated verification runs in GitHub Actions, and bug reports or focused pull requests are welcome through GitHub Issues/PRs.
 
-**Windows**
+Current tested baseline: **39 tools in `slim`** and **53 native tools in the full catalog**.
+
+## Requirements
+
+- Node.js 20 or newer
+- npm
+- Git if you want the git tools
+- Windows PowerShell for the included `.ps1` and one-click tunnel helpers
+
+The Node/TypeScript MCP server itself is cross-platform. The Windows tunnel convenience scripts are not.
+
+## Quick start
 
 ```powershell
-git clone https://github.com/hoangcoderr/chatgpt-local-coder.git
-cd chatgpt-local-coder
-copy .env.example .env          # edit WORKSPACE_PATH + MCP_TOKEN
-npm install
+git clone https://github.com/jamesmendax/chatgpt-local-coder-enhanced.git
+cd chatgpt-local-coder-enhanced
+copy .env.example .env
+npm ci
 npm run build
+```
+
+Edit `.env` and set at minimum:
+
+```env
+WORKSPACE_PATH=C:\path\to\your\project
+MCP_TOKEN=<generate-a-long-random-token>
+```
+
+Generate a token with:
+
+```powershell
+node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"
+```
+
+Start the MCP server:
+
+```powershell
 .\start.ps1
 ```
 
-**macOS / Linux**
+Health check:
 
-```bash
-git clone https://github.com/hoangcoderr/chatgpt-local-coder.git
-cd chatgpt-local-coder
-cp .env.example .env
-npm install && npm run build
-
-# Set your project root and an auth token
-node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"   # paste into MCP_TOKEN
-
-npm start
+```text
+http://127.0.0.1:3000/health
 ```
 
-> The `.ps1` scripts are **Windows-only**. On macOS/Linux use `npm start` and the shell tunnel commands below — everything else is cross-platform.
+Do **not** expose the Admin UI port (`ADMIN_PORT`, default 3001) through a tunnel.
 
-Server runs at `http://127.0.0.1:3000` — health check: `http://127.0.0.1:3000/health`
+## Connect ChatGPT
 
-Set `WORKSPACE_PATH` to your project root (absolute path). With `MCP_TOKEN` set, the MCP endpoint becomes `/mcp/<token>` — that full path is what goes in the connector.
+For current ChatGPT Business custom MCP apps:
 
-## 🔌 Connect ChatGPT
+1. Start the local MCP server and your tunnel.
+2. In the Business workspace, open **Workspace Settings -> Apps** and create a custom MCP app.
+3. Enter the tunnel connection details.
+4. Run **Scan Tools**.
+5. Create the app as a draft and test it in a new chat.
+6. Publish only after the draft works.
 
-### 1. Enable Developer Mode
+Published Business custom MCP apps use a snapshot of the tool definitions. If you later change tool names or input schemas, recreate/re-publish the app rather than assuming the published app will automatically pick up the new tool list.
 
-1. Open [ChatGPT](https://chatgpt.com) → **Settings** → **Apps & Connectors**
-2. Under **Advanced**, enable **Developer mode**
+OpenAI reference: [Developer mode, apps, and full MCP connectors](https://help.openai.com/en/articles/12584461-developer-mode-apps-and-full-mcp-connectors-in-chatgpt-beta).
 
-### 2. Expose your server (pick one tunnel)
+More detail: [docs/CHATGPT_BUSINESS.md](docs/CHATGPT_BUSINESS.md).
 
-See [Tunnel options](#-tunnel-options) below. You need a **public HTTPS** URL pointing to your local server on port 3000.
+## OpenAI Secure MCP Tunnel on Windows
 
-### 3. Create a connector
+The helper downloads/uses OpenAI's `tunnel-client` and generates its local profile under the gitignored `profiles/` directory.
 
-1. **Settings** → **Connectors** → **Create**
-2. Fill in:
-
-| Field | Value |
-|-------|-------|
-| **Name** | `Local Coder` |
-| **Description** | `Local coding agent. First call agent_status + project_context. Use glob/grep to explore, apply_patch to edit, run_command for shell.` |
-| **URL** | `https://<your-tunnel>/mcp/<MCP_TOKEN>` — see below |
-| **Authentication** | None (the token is already in the URL) |
-
-3. **Create** → verify tools appear in the list
-
-**The URL must include your `MCP_TOKEN`.** With `MCP_TOKEN=abc123`, the connector URL is `https://<your-tunnel>/mcp/abc123`. Plain `/mcp` returns **404** by design, so a URL without the token fails. Leave `MCP_TOKEN` empty to disable auth and use plain `/mcp` — not recommended, since anyone who learns the tunnel URL gets a shell on your machine.
-
-> Treat the connector URL like a password: it contains the token.
-
-### 4. Use in chat — **must tag the connector**
-
-Every message that should use local tools **must include the connector**. If you skip this, ChatGPT only uses built-in tools, may show *"Looking for available tools"* / *"Đang tìm các công cụ có sẵn"*, then **"Error in message stream"** / **"Lỗi trong luồng tin nhắn"** — with **no error in server logs** (the MCP server was never called).
-
-**How to tag (pick one):**
-
-1. **Before sending:** **New chat** → **+** (tools) → **More** → enable **Local Coder** (connector stays on for that chat).
-2. **In the message:** type **`@`** and choose **Local Coder** (or your connector name) so it appears as a pill/chip above the input.
-
-Then send your prompt. You should see tool permission prompts or MCP activity — not a dead stream with no server log.
-
-Example prompts (after tagging):
-
-- *"Read package.json and explain the dependencies"*
-- *"Run npm test and fix any failures"*
-- *"Find all TODO comments with grep and summarize"*
-
-> **Tip:** After server updates or restarts → **Refresh** the connector and start a **new chat** (re-tag the connector).  
-> **Avoid** clicking **"Always allow"** on permission popups — it can reset the MCP session. Configure permissions in **Settings → Apps** instead.
-
-## 🌐 Tunnel options
-
-### Option A — OpenAI Secure MCP Tunnel *(recommended)*
-
-Stable tunnel ID — connector URL never changes.
+First install the tunnel client:
 
 ```powershell
-# Terminal 1
-.\start.ps1 -Force
+.\openai-tunnel.ps1 -Install
+```
 
-# Terminal 2 — first time only
-.\openai-tunnel.ps1 -Init    # enter tunnel_id + Runtime API key from OpenAI Platform
+Configure the primary tunnel ID in `.env`:
 
-# Every time after
+```env
+OPENAI_TUNNEL_ID=tunnel_<your-id>
+OPENAI_TUNNEL_HEALTH_PORT=8080
+```
+
+Prefer storing the Runtime API key with Windows DPAPI instead of plaintext `.env`:
+
+```powershell
+.\save-free-key.cmd
+```
+
+Then run:
+
+```powershell
 .\openai-tunnel.ps1
 ```
 
-Get credentials: [OpenAI Platform → Tunnels](https://platform.openai.com/settings/organization/tunnels)
+### Optional second Business tunnel
 
-In ChatGPT Connectors: **Connection type → Tunnel** → paste your `tunnel_…` ID.
-
-> **macOS / Linux:** `openai-tunnel.ps1` is PowerShell and downloads the **Windows** build, so it does not work here. Grab the matching `tunnel-client` binary from [openai/tunnel-client releases](https://github.com/openai/tunnel-client/releases) and run it directly, or use one of the options below.
-
-### Option B — Cloudflare Quick Tunnel
-
-Free, but URL changes on every restart (update connector each time).
-
-```powershell
-# Windows — Terminal 1
-.\start.ps1
-# Terminal 2
-.\tunnel.ps1    # copy https://….trycloudflare.com into connector URL
-```
-
-```bash
-# macOS / Linux — Terminal 1
-npm start
-# Terminal 2
-npm run tunnel  # cloudflared tunnel --url http://localhost:3000
-```
-
-Install cloudflared: `winget install Cloudflare.cloudflared` (Windows) · `brew install cloudflared` (macOS)
-
-**Requires outbound port 7844** (TCP *and* UDP) to `*.argotunnel.com`. Many corporate/school/hotel networks block it, and `--protocol http2` does **not** help — it still uses 7844. Check with:
-
-```bash
-cloudflared tunnel --url http://localhost:3000 2>&1 | grep -E 'precheck|Registered'
-```
-
-If you see `TCP Connectivity … status=fail` and never `Registered tunnel connection`, the network is blocking it — use Option C.
-
-### Option C — Pinggy *(works when Cloudflare is blocked)*
-
-Pure SSH over port **443**, so it survives networks that block 7844. No install, no signup.
-
-```bash
-# Terminal 1
-npm start
-
-# Terminal 2
-ssh -p 443 -R0:localhost:3000 a.pinggy.io
-```
-
-It prints two HTTPS URLs (`https://….free.pinggy.net` and `https://….run.pinggy-free.link`) — pick either and append `/mcp/<MCP_TOKEN>` for the connector.
-
-Free sessions expire after **60 minutes** and the URL changes each time, so you re-paste the connector URL. A paid plan gives persistent URLs.
-
-## 🧰 Tools
-
-**40+ tools** with structured JSON responses `{ ok, tool, summary, data }`.
-
-### Onboarding *(call these first)*
-
-| Tool | Description |
-|------|-------------|
-| `agent_status` | Permissions, workspace roots, audit log |
-| `project_context` | Reads AGENTS.md, README, CLAUDE.md, configs |
-
-### Filesystem
-
-| Tool | Description |
-|------|-------------|
-| `read_text_file` | Read source files (offset + limit) |
-| `write_file` | Create or overwrite files |
-| `edit_file` | Find-and-replace edits |
-| `multi_edit` | Multiple edits in one file |
-| `replace_regex` | Regex replace in file |
-| `apply_patch` | Unified / Codex-style patches |
-| `glob` | Find files by pattern (sorted by mtime) |
-| `grep` | Search content (content / files / count modes) |
-| `list_directory` | List folder contents |
-| `directory_tree` | Recursive tree as JSON |
-| `create_directory` | Create folders |
-| `delete_file` / `delete_directory` | Remove files or dirs |
-| `copy_file` / `move_file` | Copy or rename |
-| `read_file_base64` / `write_file_base64` | Binary file support |
-
-### Shell
-
-| Tool | Description |
-|------|-------------|
-| `run_command` | Run shell commands (`npm test`, builds, …) |
-| `shell_status` / `shell_reset` | Persistent shell session |
-| `start_process` | Long-running / background commands |
-| `process_status` / `process_output` / `stop_process` | Manage background jobs |
-
-### Git
-
-| Tool | Description |
-|------|-------------|
-| `git_status` / `git_diff` / `git_log` | Inspect repo |
-| `git_add` / `git_commit` | Stage and commit |
-| `git_branch` / `git_checkout` | Branch list, create, switch (local only) |
-| `git_restore` | Restore tracked files to last commit |
-| `git_push` / `git_pull` | Sync with configured remote |
-| `git_stash` / `git_reset` | Stash and reset |
-
-### Claude Code ↔ MCP mapping
-
-| Claude Code | This server |
-|-------------|-------------|
-| `Read` | `read_text_file` |
-| `Write` | `write_file` |
-| `Edit` / `MultiEdit` | `edit_file` / `multi_edit` |
-| `Glob` / `Grep` / `LS` | `glob` / `grep` / `list_directory` |
-| `Bash` | `run_command` |
-| — | `apply_patch`, `git_*`, `project_context` |
-
-## ⚙️ Configuration
-
-Copy `.env.example` → `.env`:
+A second tunnel can share the same local MCP server. Configure only its ID/health port in `.env`:
 
 ```env
-PORT=3000
-HOST=127.0.0.1
-MCP_TOKEN=                      # generate one — see below
-WORKSPACE_PATH=C:\Users\You\projects\my-app     # macOS: /Users/you/projects/my-app
-CHATGPT_AUTO_APPROVE=true
-SHELL_TIMEOUT=120
-MCP_SESSION_RECOVERY=true
-ADMIN_PORT=3011
-
-# OpenAI Secure Tunnel (optional)
-OPENAI_TUNNEL_ID=
-OPENAI_TUNNEL_API_KEY=
+OPENAI_BUSINESS_TUNNEL_ID=tunnel_<your-business-id>
+OPENAI_BUSINESS_TUNNEL_HEALTH_PORT=8081
 ```
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WORKSPACE_PATH` | `cwd` | **Your project root** (like `cd` before `claude`). Auto-loads `CLAUDE.md` / `AGENTS.md` into MCP instructions |
-| `HOST` | `127.0.0.1` | Bind address. Keep as-is — `0.0.0.0` exposes the shell to your whole LAN |
-| `MCP_TOKEN` | *(empty)* | Secret in the endpoint path: `/mcp/<token>`. Empty = **no auth**. Generate: `node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"` |
-| `ADMIN_PORT` | `3001` | [Admin UI](#-admin-ui) port (localhost-only, always on). Change it if something else uses 3001 — Docker Desktop often does |
-| `ADMIN_TOKEN` | *(empty)* | Bearer token for the Admin UI. Empty = loopback check only |
-| `CHATGPT_AUTO_APPROVE` | `true` | Tool annotations to reduce ChatGPT popups |
-| `MCP_SESSION_RECOVERY` | `true` | Auto-recover stale sessions after restart |
-| `SHELL_TIMEOUT` | `120` | Max seconds for `run_command` |
-| `FULL_DISK_ACCESS` | `true` | Access any path on the machine |
-
-> Variables already set in your shell **win over `.env`** (`dotenv` does not override). If a change to `.env` seems ignored, check `env | grep WORKSPACE_PATH` first.
-
-> **Full machine access** is enabled by default. `WORKSPACE_PATH` only sets the default cwd — absolute paths like `D:\Projects\…` work everywhere.
-
-## 🖥️ Admin UI
-
-A local web console ships with the server. It starts **automatically** with `npm start` (same process, separate port) — there is no separate command and no on/off switch.
-
-```
-http://127.0.0.1:3001/ui          # or your ADMIN_PORT
-```
-
-The exact URL is printed in the startup banner. Stopping the server stops the admin UI too (`Ctrl+C`, `.\stop.ps1`, or `pkill -f "dist/index.js"`).
-
-| Tab | What it does |
-|-----|--------------|
-| **Tổng quan** | PID, active ChatGPT sessions, default cwd, upstream health |
-| **MCP Servers** | Enable/disable upstream MCP servers, test connections, inspect their tools |
-| **Import** | Pull existing MCP config from Cursor / Claude Code / OpenCode |
-| **Nhật ký** | Live tool-call log from ChatGPT (SSE stream) |
-| **Project** | Preview the exact MCP instructions injected into ChatGPT each session |
-| **Cài đặt** | Read **and write** `.env` |
-| **Raw status** | Raw JSON status dump |
-
-This is the **hub** side of the project: upstream MCP servers are proxied through this one connector, so ChatGPT reaches their tools without being wired up separately. Configure them in `MCP_UPSTREAM_CONFIG` (default `profiles/mcp-upstream.json`).
-
-> ⚠️ **Never expose this port through a tunnel** — only tunnel port 3000. The admin API writes `.env`, so reaching it means being able to change `WORKSPACE_PATH` or switch `MCP_TOKEN` off. It is protected by a loopback-only guard plus the optional `ADMIN_TOKEN`; since it cannot be disabled, setting `ADMIN_TOKEN` is worthwhile.
-
-## 🏗️ Architecture
-
-```
-src/
-├── index.ts                 # Express + MCP session manager
-├── server-factory.ts        # Tool registration
-├── lib/
-│   ├── mcp-session-manager.ts   # Session recovery, TTL
-│   ├── patch.ts             # apply_patch engine
-│   └── persistent-shell.ts  # Stateful shell
-└── tools/
-    ├── filesystem.ts        # 18 tools
-    ├── shell.ts             # 8 tools
-    ├── git.ts               # 11 tools
-    └── context.ts           # agent_status, project_context
-```
-
-- **Transport:** MCP Streamable HTTP — `/mcp/<MCP_TOKEN>` and `/<MCP_TOKEN>` (or `/mcp` and `/` when `MCP_TOKEN` is empty)
-- **Session:** Stateful with auto-recovery when ChatGPT holds a stale session ID
-- **Output:** Structured JSON from every tool
-
-## 🧪 Development
+Store its Runtime key once:
 
 ```powershell
-npm run build          # compile TypeScript
-npm test               # patch + tool unit tests
-npm run dev            # watch mode (tsx)
-node scripts/test-mcp-session.mjs   # integration test (server must be running)
+.\save-business-key.cmd
 ```
 
-## 🔒 Security
+One-click launchers:
 
-This server grants **full access to your machine** — files, shell, git. Only expose it through a tunnel you control. Never share your connector URL or tunnel API keys.
+```text
+start-free-plugin.cmd
+stop-free-plugin.cmd
+start-business-plugin.cmd
+stop-business-plugin.cmd
+```
 
-- Binds `127.0.0.1` only (`HOST`) — not reachable from your LAN. The tunnel connects to localhost, so it still works
-- `MCP_TOKEN` guards the endpoint at `/mcp/<token>`; `/mcp` and `/` return 404. **Set it** — without it, anyone who learns your tunnel URL gets a shell
-- The connector URL contains the token — treat it as a credential, and stop the tunnel when you are done
-- `WORKSPACE_PATH` only sets the *default* cwd; it does **not** restrict access (`FULL_DISK_ACCESS` is on)
-- The [Admin UI](#-admin-ui) is always running and can write `.env` — tunnel **only** port 3000, never `ADMIN_PORT`, and set `ADMIN_TOKEN`
-- `.env` and secrets are gitignored
-- Audit log: `.mcp-audit.log` (optional, configurable)
-- Use on a trusted network / personal machine only
+Both roles share the same port-3000 MCP process and therefore the same configured `WORKSPACE_PATH`; the launchers only separate the tunnel processes. See [docs/WINDOWS_DUAL_TUNNEL.md](docs/WINDOWS_DUAL_TUNNEL.md).
 
-## 🩺 Troubleshooting
+## Binary files and large ChatGPT attachments
 
-| Problem | Fix |
-|---------|-----|
-| **"Error in message stream"** / **"Lỗi trong luồng tin nhắn"** right after *"Looking for tools"* — **no server log** | You did **not tag the connector**. New chat → **+** → **More** → enable connector, or type **`@Local Coder`** in the message. Then retry. |
-| **Resource not found** on tool call | Refresh connector + new chat. Server auto-recovers sessions — ensure latest build is running. |
-| **Connection failed** | Check `.\start.ps1` + tunnel are both running. URL must be HTTPS. |
-| **Permission popup every call** | Settings → Apps → set connector to *Ask before important changes*. Don't use popup "Always allow". |
-| **Tool blocked by OpenAI safety** | Not a server bug. Retry with `run_command` (response may include `run_command_fallback`). Affects `git_push`, `git_checkout`, `delete_directory` occasionally. |
-| **`stream canceled`** in tunnel log | Server/tunnel restarted mid-session → refresh connector, new chat. |
-| **Tunnel URL keeps changing** | Switch to OpenAI Secure Tunnel (`openai-tunnel.ps1`). |
-| **Connector stuck "loading" forever when you click Create** | Make sure you are on the latest build (`npm run build`) — older builds deadlocked on the SSE stream and never answered `tools/list`. Also confirm the URL includes `/mcp/<MCP_TOKEN>`. |
-| **404 on the connector URL** | You omitted the token. Use `https://<tunnel>/mcp/<MCP_TOKEN>`, not `/mcp`. |
-| **cloudflared never prints "Registered tunnel connection"** | Network blocks port 7844. `--protocol http2` will not help (same port). Use Pinggy — Option C. |
-| **`EADDRINUSE` on 3001 at startup** | Something else owns the admin port (often Docker Desktop). Set `ADMIN_PORT=3011`. |
-| **`.env` changes seem ignored** | A shell variable of the same name overrides it. Check `env \| grep WORKSPACE_PATH`. |
-| **`npm test` fails with `spawn bash ENOENT`** | Stale `.mcp-state` from a previous run. `rm -rf .mcp-state` and re-run. |
-| **`.ps1` scripts do nothing on macOS** | They are Windows-only. Use `npm start` and the Option B/C shell commands. |
-| **Access denied** | Wrong path or OS permissions on that file. |
-| **git not found** | Install [Git](https://git-scm.com). |
+For a file attached to the current ChatGPT conversation, prefer `save_chatgpt_file`. ChatGPT supplies a temporary authorized attachment reference through the MCP `openai/fileParams` mechanism, and the local MCP streams the original bytes directly to disk instead of sending the whole file through Base64 tool arguments.
 
-See also [AGENTS.md](AGENTS.md) for agent onboarding and `apply_patch` format.
+```text
+ChatGPT conversation attachment
+          |
+          v
+   save_chatgpt_file
+          |
+          v
+    target.bin.part
+          |
+          +-- HTTPS/public-host checks
+          +-- streaming size limit
+          +-- metadata/Content-Length checks
+          +-- SHA256 while streaming
+          |
+          v
+     atomic finalize
+          |
+          v
+      target.bin
+```
 
-## 📚 References
+The current default safety limit for this direct attachment path is **512 MiB**. Redirects are bounded, URLs must use HTTPS, and localhost/private/reserved destinations are rejected to reduce SSRF risk.
 
-- [Model Context Protocol](https://modelcontextprotocol.io)
-- [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk)
-- [ChatGPT Apps SDK](https://developers.openai.com/apps-sdk)
-- [OpenAI Secure MCP Tunnel](https://platform.openai.com/docs/guides/secure-mcp-tunnel)
+For generic binary transfer when there is no ChatGPT attachment object, use `read_file_base64` / `write_file_base64`. Reliable Base64 writes support `<target>.part`, `expected_size`, and optional `expected_sha256` validation before finalization.
 
-## 📄 License
+`file_info` can verify the final local file's size, hash, timestamps, and leading magic bytes.
 
-[MIT](LICENSE) — use freely, attribution appreciated.
+See [docs/BINARY_FILES.md](docs/BINARY_FILES.md).
 
-## ⭐ Support
+## Tool profiles
 
-If this saves you time, **star the repo** — it helps others find it.
+Set in `.env`:
 
----
+```env
+CHATGPT_TOOL_PROFILE=slim
+```
 
-## 🇻🇳 Tiếng Việt
+- `slim`: 39 tools in the current test suite; optimized for ChatGPT web discovery.
+- `full`: all 53 statically registered native tools.
 
-**ChatGPT Local Coder** biến ChatGPT web thành agent code trên máy bạn qua MCP.
+Core filesystem tools exposed in `slim` include:
+
+```text
+read_text_file
+read_file_base64
+file_info
+write_file
+write_file_base64
+save_chatgpt_file
+edit_file
+multi_edit
+apply_patch
+glob
+grep
+list_directory
+create_directory
+copy_file
+move_file
+delete_file
+```
+
+`delete_directory` remains outside the default slim set.
+
+## Security model
+
+Important defaults and recommendations:
+
+- keep `HOST=127.0.0.1`
+- set a strong `MCP_TOKEN` before exposing port 3000 remotely
+- never tunnel `ADMIN_PORT`
+- set `ADMIN_TOKEN` if you use the Admin UI regularly
+- never commit `.env`, `.secrets/`, generated tunnel profiles, audit logs, or MCP state
+- only connect trusted ChatGPT workspaces/clients
+- do not send untrusted instructions to a connector with full local shell/file privileges
+- review destructive operations such as deletes, resets, installs, or scripts from unknown repositories
+
+See [SECURITY.md](SECURITY.md).
+
+## Development
 
 ```powershell
-git clone https://github.com/hoangcoderr/chatgpt-local-coder.git
-cd chatgpt-local-coder
-copy .env.example .env
-npm install && npm run build
-.\start.ps1                    # terminal 1
-.\openai-tunnel.ps1            # terminal 2 (tunnel cố định)
+npm ci
+npm run build
+npm run test:all
+npm run check:secrets
 ```
 
-**macOS / Linux** — các script `.ps1` chỉ chạy trên Windows:
+Or run the combined verification command:
 
-```bash
-git clone https://github.com/hoangcoderr/chatgpt-local-coder.git
-cd chatgpt-local-coder
-cp .env.example .env
-npm install && npm run build
-
-# Tạo token rồi dán vào MCP_TOKEN trong .env
-node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"
-
-npm start                                    # terminal 1
-ssh -p 443 -R0:localhost:3000 a.pinggy.io    # terminal 2
+```powershell
+npm run verify
 ```
 
-Dùng Pinggy nếu mạng chặn cloudflared (cổng 7844). Nếu cloudflared chạy được thì `npm run tunnel` cũng ổn.
+The integration suite starts a temporary MCP server on a separate test port; it does not require replacing your normal port-3000 service.
 
-**ChatGPT:** Settings → Connectors → tạo connector → Refresh → chat mới.
+## Repository hygiene
 
-**URL connector phải có token:** `https://<tunnel>/mcp/<MCP_TOKEN>`. Vào `/mcp` trơn sẽ trả **404**. Coi URL này như mật khẩu — ai có nó là có shell trên máy bạn.
+Runtime/private data is intentionally ignored, including:
 
-**Bắt buộc tag connector mỗi chat:** Chat mới → **+** → **More** → bật connector, hoặc gõ **`@`** + tên connector trong ô chat. Nếu không tag, ChatGPT báo *"Đang tìm các công cụ có sẵn"* rồi *"Lỗi trong luồng tin nhắn"* — **server không có log lỗi** vì MCP chưa được gọi.
+```text
+.env
+.secrets/
+profiles/*.yaml
+bin/
+node_modules/
+dist/
+.mcp-state/
+.mcp-checkpoints/
+.mcp-audit.log
+```
 
-**WORKSPACE_PATH:** đặt đúng thư mục project (không phải thư mục `chatgpt-local-coder`). Server tự đọc `CLAUDE.md` / `AGENTS.md` giống Claude Code.
+The repository includes a lightweight secret-pattern check in addition to GitHub's own secret-scanning features.
 
-**Admin UI:** tự bật cùng `npm start` tại `http://127.0.0.1:<ADMIN_PORT>/ui` (mặc định 3001), không tắt riêng được. Dùng để quản lý MCP server khác, xem log tool call, sửa `.env`. **Đừng tunnel cổng này ra ngoài** — chỉ tunnel :3000.
+## Contributing
 
-**Lưu ý:** Không bấm **"Luôn cho phép"** trên popup — cấu hình quyền ở Settings → Apps. Sau khi restart server: Refresh connector + mở chat mới + tag lại connector.
+Please read [CONTRIBUTING.md](CONTRIBUTING.md). Run `npm run verify` before opening a pull request. Bug reports can use the repository issue template, and focused improvements are welcome.
 
-Chi tiết cho AI agent: [AGENTS.md](AGENTS.md)
+## License
+
+MIT. The original upstream copyright notice is preserved in [LICENSE](LICENSE). Additional attribution and fork information are in [NOTICE.md](NOTICE.md).
+
+## Disclaimer
+
+This project is provided on an **"AS IS"** basis, without warranties or guarantees of availability, fitness for a particular purpose, security, data integrity, or compatibility with any specific ChatGPT/OpenAI configuration. You are solely responsible for how you deploy and use it, including any filesystem, shell, Git, network, tunnel, credential, or data-access consequences. The maintainers are not responsible for direct or indirect loss, data loss, service interruption, account issues, security incidents, or other damages resulting from use of this project.
+
+## Non-commercial use notice
+
+The maintainer does **not authorize or endorse commercial use of the enhanced additions maintained in this fork** without prior permission. If you plan to sell this enhanced fork, bundle its enhanced functionality into a paid product or service, provide paid deployment/support based on the maintainer's added work, or otherwise use the maintainer's original enhancements for commercial gain, please obtain permission from the maintainer first.
+
+> Important: this repository is derived from MIT-licensed upstream software. The upstream MIT license grants rights, including commercial-use rights, to the upstream code covered by that license. This non-commercial notice is not intended to revoke or misrepresent rights already granted by the upstream MIT license. If stricter, legally enforceable non-commercial terms are required for the maintainer's original additions, those additions should be placed under a separate compatible license/notice rather than treating the entire upstream-derived repository as non-commercial.

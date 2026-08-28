@@ -4,10 +4,15 @@ import path from "path";
 export type ToolProfileName = "full" | "slim";
 
 export const LOCAL_TOOL_CATALOG = [
-  "read_text_file", "write_file", "edit_file", "multi_edit", "apply_patch", "glob", "grep", "list_directory",
-  "run_command", "shell_status", "shell_reset", "start_process", "process_output", "node_repl", "ponytail_turn",
-  "git_status", "git_diff", "git_add", "git_commit", "git_restore", "agent_status", "project_context",
-  "remember", "load_path_rules", "list_skills", "load_skill", "rewind", "mcp_servers", "mcp_tools", "mcp_call",
+  "read_text_file", "read_file_base64", "file_info", "write_file", "write_file_base64", "save_chatgpt_file", "edit_file", "multi_edit", "apply_patch",
+  "glob", "grep", "list_directory", "directory_tree", "search_files", "create_directory", "delete_file", "delete_directory",
+  "copy_file", "move_file", "replace_regex", "list_allowed_directories",
+  "run_command", "shell_status", "shell_reset", "start_process", "process_status", "process_output", "stop_process", "clear_processes",
+  "node_repl", "ponytail_turn",
+  "git_status", "git_diff", "git_log", "git_add", "git_commit", "git_branch", "git_checkout", "git_restore", "git_stash",
+  "git_reset", "git_pull", "git_push",
+  "agent_status", "project_context", "remember", "load_path_rules", "list_skills", "load_skill", "rewind",
+  "mcp_servers", "mcp_tools", "mcp_call",
 ];
 
 interface LocalToolOverrides {
@@ -33,17 +38,29 @@ export function saveLocalToolOverrides(next: LocalToolOverrides): void {
 /** Core tools for ChatGPT web — smaller tools/list payload, fewer discovery errors. */
 export const SLIM_CHATGPT_TOOLS = new Set([
   "read_text_file",
+  "read_file_base64",
+  "file_info",
   "write_file",
+  "write_file_base64",
+  "save_chatgpt_file",
   "edit_file",
   "multi_edit",
   "apply_patch",
   "glob",
   "grep",
   "list_directory",
+  "create_directory",
+  "copy_file",
+  "move_file",
+  "delete_file",
   "run_command",
   "shell_status",
+  "shell_reset",
   "start_process",
+  "process_status",
   "process_output",
+  "stop_process",
+  "clear_processes",
   "git_status",
   "git_diff",
   "git_add",

@@ -19,7 +19,10 @@ export interface ActivityEntry {
   details?: Record<string, unknown>;
 }
 
-const MAX_ENTRIES = parseInt(process.env.ACTIVITY_LOG_MAX || "500", 10);
+const parsedMaxEntries = Number.parseInt(process.env.ACTIVITY_LOG_MAX || "500", 10);
+const MAX_ENTRIES = Number.isFinite(parsedMaxEntries)
+  ? Math.min(Math.max(parsedMaxEntries, 50), 5000)
+  : 500;
 const entries: ActivityEntry[] = [];
 const listeners = new Set<(entry: ActivityEntry) => void>();
 
@@ -28,11 +31,22 @@ function trimSummary(text: string, max = 160): string {
   return oneLine.length <= max ? oneLine : oneLine.slice(0, max - 1) + "…";
 }
 
+export function redactSensitiveText(text: string): string {
+  return text
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]")
+    .replace(
+      /\b([A-Za-z0-9_]*(?:api[_-]?key|token|secret|password)[A-Za-z0-9_]*)\s*=\s*([^\s;]+)/gi,
+      "$1=[REDACTED]"
+    );
+}
+
 export function summarizeToolArgs(tool: string, args: unknown): string {
   if (!args || typeof args !== "object") return "";
   const a = args as Record<string, unknown>;
 
-  if (tool === "run_command" && typeof a.command === "string") return trimSummary(a.command, 120);
+  if (tool === "run_command" && typeof a.command === "string") {
+    return trimSummary(redactSensitiveText(a.command), 120);
+  }
   if (typeof a.path === "string") return a.path;
   if (typeof a.server_id === "string" && typeof a.tool === "string") {
     return `${a.server_id} → ${a.tool}`;
@@ -41,11 +55,8 @@ export function summarizeToolArgs(tool: string, args: unknown): string {
   if (typeof a.checkpoint_id === "string") return `checkpoint: ${a.checkpoint_id}`;
   if (typeof a.action === "string") return `action: ${a.action}`;
 
-  try {
-    return trimSummary(JSON.stringify(a));
-  } catch {
-    return "";
-  }
+  const keys = Object.keys(a).slice(0, 12);
+  return keys.length ? `args: ${keys.join(", ")}` : "";
 }
 
 export function appendActivity(partial: Omit<ActivityEntry, "id" | "time"> & { time?: string }): ActivityEntry {
@@ -230,7 +241,10 @@ export function logMcpRequest(
       summary,
       details: {
         http_status: httpStatus,
-        arguments: rpc.params.arguments,
+        argument_keys:
+          rpc.params.arguments && typeof rpc.params.arguments === "object"
+            ? Object.keys(rpc.params.arguments as Record<string, unknown>).slice(0, 24)
+            : [],
         ...(errorMessage ? { error: errorMessage } : {}),
       },
     });

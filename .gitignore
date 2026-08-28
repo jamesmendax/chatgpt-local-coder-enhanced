@@ -1,21 +1,36 @@
 node_modules/
 dist/
+coverage/
+
+# Local runtime state
 .mcp-audit.log
 .mcp-checkpoints/
-.tool-test-tmp/
-bin/
-profiles/*
-!profiles/mcp-upstream.json
-!profiles/post-edit-hooks.json
-!profiles/chatgpt-connector-description.txt
 .mcp-state/
 .mcp-oauth/
+.tool-test-tmp/
 .codex-remote-attachments/
-.env
 terminals/
 agent-tools/
 mcps/
 log_console.txt
 *.log
+*.part
+*.tmp
+
+# Local binaries and generated tunnel profiles
+bin/
+profiles/*
+!profiles/mcp-upstream.json
+!profiles/post-edit-hooks.json
+!profiles/chatgpt-connector-description.txt
+
+# Secrets and machine-specific environment
+.env
+.env.*
+!.env.example
+.secrets/
+.npmrc
+
+# OS/editor noise
 .DS_Store
 Thumbs.db

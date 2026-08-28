@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  linux:
+    name: Linux / Node 20
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Verify public repository
+        run: npm run verify
+
+      - name: Build
+        run: npm run build
+
+  windows:
+    name: Windows / Node 20
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Verify public repository
+        run: npm run verify
+
+      - name: Build
+        run: npm run build
+
+      - name: Validate PowerShell syntax
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem -Path . -Filter *.ps1 -Recurse -File |
+            Where-Object { $_.FullName -notmatch '\\node_modules\\|\\dist\\' } |
+            ForEach-Object {
+              $tokens = $null
+              $errors = $null
+              [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+              if ($errors.Count -gt 0) {
+                Write-Host "::error file=$($_.FullName)::$($errors -join '; ')"
+                $failed = $true
+              }
+            }
+          if ($failed) { exit 1 }
+
+      - name: Validate Windows launcher files
+        shell: pwsh
+        run: |
+          $required = @(
+            'start-free-plugin.cmd',
+            'stop-free-plugin.cmd',
+            'start-business-plugin.cmd',
+            'stop-business-plugin.cmd',
+            'openai-tunnel.ps1',
+            'openai-tunnel-business.ps1',
+            '_one-click-control.ps1'
+          )
+          foreach ($file in $required) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+              Write-Error "Required Windows launcher file is missing: $file"
+              exit 1
+            }
+          }

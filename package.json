@@ -1,16 +1,17 @@
 {
-  "name": "chatgpt-local-coder",
-  "version": "1.0.0",
-  "description": "Turn ChatGPT web into a local coding agent via MCP — files, shell, git, apply_patch, 40+ tools",
+  "name": "chatgpt-local-coder-enhanced",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Enhanced self-hosted MCP server for ChatGPT with local filesystem, shell, git, checkpoints, direct attachment saving, and verified binary-file capabilities.",
+  "author": "hoangcoderr and contributors; enhanced fork maintained by jamesmendax",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hoangcoderr/chatgpt-local-coder.git"
+    "url": "https://github.com/jamesmendax/chatgpt-local-coder-enhanced.git"
   },
-  "homepage": "https://github.com/hoangcoderr/chatgpt-local-coder#readme",
+  "homepage": "https://github.com/jamesmendax/chatgpt-local-coder-enhanced#readme",
   "bugs": {
-    "url": "https://github.com/hoangcoderr/chatgpt-local-coder/issues"
+    "url": "https://github.com/jamesmendax/chatgpt-local-coder-enhanced/issues"
   },
-  "author": "hoangcoderr",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -21,6 +22,8 @@
     "test": "tsc && node scripts/test-patch.mjs && node scripts/test-tools.mjs && node scripts/test-checkpoints.mjs && node scripts/test-mcp-upstream.mjs && node scripts/test-mcp-oauth.mjs && node scripts/test-activity-log.mjs && node scripts/test-project-memory.mjs && node scripts/test-tool-profile.mjs && node scripts/test-shell-persist.mjs",
     "test:all": "node scripts/run-all-tests.mjs",
     "test:integration": "tsc && node scripts/test-mcp-bridge-integration.mjs",
+    "check:secrets": "node scripts/check-public-secrets.mjs",
+    "verify": "npm run check:secrets && npm run test:all",
     "init-claude-md": "node scripts/init-claude-md.mjs",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
@@ -33,12 +36,16 @@
     "model-context-protocol",
     "local-development",
     "filesystem",
+    "binary-files",
     "git",
     "apply-patch",
     "developer-mode",
     "openai-tunnel"
   ],
   "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "cors": "^2.8.6",

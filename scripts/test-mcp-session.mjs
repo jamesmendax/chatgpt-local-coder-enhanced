@@ -2,6 +2,10 @@
  * Integration test: MCP session init, tool call, stale-session recovery.
  * Requires server running on PORT (default 3000).
  */
+import fs from "fs/promises";
+import path from "path";
+import { createHash } from "crypto";
+
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const BASE = `http://127.0.0.1:${PORT}`;
 
@@ -76,6 +80,8 @@ await run("health endpoint", async () => {
 });
 
 let sessionId;
+let listedToolNames = [];
+let listedTools = [];
 await run("initialize session on /mcp", async () => {
   const out = await initialize("/mcp");
   sessionId = out.sessionId;
@@ -89,8 +95,259 @@ await run("tools/list with valid session", async () => {
     { "mcp-protocol-version": "2025-03-26" }
   );
   if (status !== 200) throw new Error(`HTTP ${status}`);
-  if (!json?.result?.tools?.some((t) => t.name === "run_command")) {
-    throw new Error("run_command not in tools/list");
+  listedTools = json?.result?.tools || [];
+  listedToolNames = listedTools.map((t) => t.name);
+  for (const required of [
+    "run_command",
+    "read_file_base64",
+    "file_info",
+    "write_file_base64",
+    "save_chatgpt_file",
+    "create_directory",
+    "copy_file",
+    "move_file",
+    "delete_file",
+    "shell_reset",
+    "process_status",
+    "process_output",
+    "stop_process",
+  ]) {
+    if (!listedToolNames.includes(required)) throw new Error(`${required} not in tools/list`);
+  }
+
+  const saveTool = listedTools.find((tool) => tool.name === "save_chatgpt_file");
+  const fileParams = saveTool?._meta?.["openai/fileParams"];
+  if (!Array.isArray(fileParams) || fileParams.length !== 1 || fileParams[0] !== "file") {
+    throw new Error(`save_chatgpt_file missing openai/fileParams metadata: ${JSON.stringify(saveTool?._meta)}`);
+  }
+  const fileSchema = saveTool?.inputSchema?.properties?.file;
+  if (!fileSchema || fileSchema.type !== "object") throw new Error("save_chatgpt_file file input is not an object schema");
+  for (const field of ["file_id", "download_url"]) {
+    if (!fileSchema.properties?.[field]) throw new Error(`save_chatgpt_file file schema missing ${field}`);
+  }
+});
+
+await run("staged PNG write finalizes only after size and SHA256 verification", async () => {
+  const payload = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlTtGQAAAAASUVORK5CYII=",
+    "base64"
+  );
+  const first = payload.subarray(0, 24);
+  const second = payload.subarray(24);
+  const expectedSha256 = createHash("sha256").update(payload).digest("hex");
+  const target = path.join(process.cwd(), ".mcp-binary-integration.png");
+  const staging = `${target}.part`;
+
+  try {
+    await fs.rm(target, { force: true });
+    await fs.rm(staging, { force: true });
+    const firstWrite = await mcpPost(
+      "/mcp",
+      {
+        jsonrpc: "2.0",
+        id: 20,
+        method: "tools/call",
+        params: {
+          name: "write_file_base64",
+          arguments: {
+            path: target,
+            content: first.toString("base64"),
+            offset: 0,
+            truncate: true,
+            expected_size: payload.length,
+            expected_sha256: expectedSha256,
+          },
+        },
+      },
+      sessionId,
+      { "mcp-protocol-version": "2025-03-26" }
+    );
+    if (firstWrite.status !== 200 || firstWrite.json?.result?.isError) {
+      throw new Error(`first chunk failed: ${firstWrite.text.slice(0, 500)}`);
+    }
+    try {
+      await fs.stat(target);
+      throw new Error("final file was visible before transfer completed");
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+    }
+    const stagedAfterFirst = await fs.stat(staging);
+    if (stagedAfterFirst.size !== first.length) throw new Error(`unexpected staging size ${stagedAfterFirst.size}`);
+
+    const secondWrite = await mcpPost(
+      "/mcp",
+      {
+        jsonrpc: "2.0",
+        id: 21,
+        method: "tools/call",
+        params: {
+          name: "write_file_base64",
+          arguments: {
+            path: target,
+            content: second.toString("base64"),
+            offset: first.length,
+            truncate: false,
+            expected_size: payload.length,
+            expected_sha256: expectedSha256,
+          },
+        },
+      },
+      sessionId,
+      { "mcp-protocol-version": "2025-03-26" }
+    );
+    if (secondWrite.status !== 200 || secondWrite.json?.result?.isError) {
+      throw new Error(`second chunk failed: ${secondWrite.text.slice(0, 500)}`);
+    }
+
+    const actual = await fs.readFile(target);
+    if (!actual.equals(payload)) throw new Error("binary payload mismatch after staged write");
+    try {
+      await fs.stat(staging);
+      throw new Error("staging file still exists after finalization");
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+    }
+
+    const info = await mcpPost(
+      "/mcp",
+      {
+        jsonrpc: "2.0",
+        id: 24,
+        method: "tools/call",
+        params: { name: "file_info", arguments: { path: target, sha256: true, head_bytes: 16 } },
+      },
+      sessionId,
+      { "mcp-protocol-version": "2025-03-26" }
+    );
+    if (info.status !== 200 || info.json?.result?.isError) {
+      throw new Error(`file_info failed: ${info.text.slice(0, 500)}`);
+    }
+    const infoData = info.json?.result?.structuredContent?.data;
+    if (infoData?.detected_type !== "png") throw new Error(`detected_type=${infoData?.detected_type}`);
+    if (infoData?.first_bytes_hex !== "89504E470D0A1A0A0000000D49484452") {
+      throw new Error(`unexpected PNG header ${infoData?.first_bytes_hex}`);
+    }
+    if (infoData?.sha256 !== expectedSha256) throw new Error("file_info SHA256 mismatch");
+
+    const retryWrite = await mcpPost(
+      "/mcp",
+      {
+        jsonrpc: "2.0",
+        id: 23,
+        method: "tools/call",
+        params: {
+          name: "write_file_base64",
+          arguments: {
+            path: target,
+            content: second.toString("base64"),
+            offset: first.length,
+            truncate: false,
+            expected_size: payload.length,
+            expected_sha256: expectedSha256,
+          },
+        },
+      },
+      sessionId,
+      { "mcp-protocol-version": "2025-03-26" }
+    );
+    if (retryWrite.status !== 200 || retryWrite.json?.result?.isError) {
+      throw new Error(`idempotent retry failed: ${retryWrite.text.slice(0, 500)}`);
+    }
+    if (retryWrite.json?.result?.structuredContent?.data?.idempotent_retry !== true) {
+      throw new Error("final retry was not recognized as idempotent");
+    }
+
+    const readBack = await mcpPost(
+      "/mcp",
+      {
+        jsonrpc: "2.0",
+        id: 22,
+        method: "tools/call",
+        params: { name: "read_file_base64", arguments: { path: target, offset: 0, length: 128 } },
+      },
+      sessionId,
+      { "mcp-protocol-version": "2025-03-26" }
+    );
+    if (readBack.status !== 200 || !readBack.text.includes(payload.toString("base64"))) {
+      throw new Error(`read-back mismatch: ${readBack.text.slice(0, 500)}`);
+    }
+  } finally {
+    await fs.rm(target, { force: true });
+    await fs.rm(staging, { force: true });
+  }
+});
+
+await run("bad final SHA256 never publishes the formal file", async () => {
+  const payload = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.alloc(60, 0x5a)]);
+  const first = payload.subarray(0, 20);
+  const second = payload.subarray(20);
+  const target = path.join(process.cwd(), ".mcp-binary-bad-hash.zip");
+  const staging = `${target}.part`;
+  const wrongSha256 = "0".repeat(64);
+
+  try {
+    await fs.rm(target, { force: true });
+    await fs.rm(staging, { force: true });
+    const firstWrite = await mcpPost(
+      "/mcp",
+      {
+        jsonrpc: "2.0",
+        id: 25,
+        method: "tools/call",
+        params: {
+          name: "write_file_base64",
+          arguments: {
+            path: target,
+            content: first.toString("base64"),
+            offset: 0,
+            truncate: true,
+            expected_size: payload.length,
+            expected_sha256: wrongSha256,
+          },
+        },
+      },
+      sessionId,
+      { "mcp-protocol-version": "2025-03-26" }
+    );
+    if (firstWrite.status !== 200 || firstWrite.json?.result?.isError) {
+      throw new Error(`bad-hash first chunk failed too early: ${firstWrite.text.slice(0, 500)}`);
+    }
+
+    const finalWrite = await mcpPost(
+      "/mcp",
+      {
+        jsonrpc: "2.0",
+        id: 26,
+        method: "tools/call",
+        params: {
+          name: "write_file_base64",
+          arguments: {
+            path: target,
+            content: second.toString("base64"),
+            offset: first.length,
+            truncate: false,
+            expected_size: payload.length,
+            expected_sha256: wrongSha256,
+          },
+        },
+      },
+      sessionId,
+      { "mcp-protocol-version": "2025-03-26" }
+    );
+    if (finalWrite.status !== 200 || !finalWrite.json?.result?.isError) {
+      throw new Error(`expected SHA256 tool error: ${finalWrite.text.slice(0, 500)}`);
+    }
+    try {
+      await fs.stat(target);
+      throw new Error("bad-hash transfer published a formal file");
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+    }
+    const staged = await fs.stat(staging);
+    if (staged.size !== payload.length) throw new Error(`bad-hash staging size ${staged.size}`);
+  } finally {
+    await fs.rm(target, { force: true });
+    await fs.rm(staging, { force: true });
   }
 });
 

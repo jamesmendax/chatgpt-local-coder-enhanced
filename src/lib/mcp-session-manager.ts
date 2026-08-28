@@ -14,15 +14,16 @@ import { runCodexSessionStartHooks } from "./codex-hooks.js";
 
 
 const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
-const SESSION_TTL_MS = parseInt(process.env.MCP_SESSION_TTL_MS || "86400000", 10); // 24h
-const SESSION_CLEANUP_INTERVAL_MS = parseInt(
-  process.env.MCP_SESSION_CLEANUP_MS || "300000",
-  10
-); // 5m
-const SESSION_DELETE_GRACE_MS = parseInt(
-  process.env.MCP_SESSION_DELETE_GRACE_MS || "45000",
-  10
-); // keep session after DELETE so in-flight tool calls can finish
+
+function boundedIntEnv(name: string, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(process.env[name] || "", 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(parsed, min), max);
+}
+
+const SESSION_TTL_MS = boundedIntEnv("MCP_SESSION_TTL_MS", 86_400_000, 60_000, 604_800_000); // 1m..7d
+const SESSION_CLEANUP_INTERVAL_MS = boundedIntEnv("MCP_SESSION_CLEANUP_MS", 300_000, 1_000, 3_600_000); // 1s..1h
+const SESSION_DELETE_GRACE_MS = boundedIntEnv("MCP_SESSION_DELETE_GRACE_MS", 45_000, 0, 600_000); // 0..10m
 
 const lastTransportErrors: Record<string, string> = {};
 const sessionOpChains = new Map<string, Promise<void>>();

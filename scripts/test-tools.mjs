@@ -1,9 +1,11 @@
 import fs from "fs/promises";
 import path from "path";
+import { createHash } from "crypto";
 import { fileURLToPath } from "url";
 import { globFiles } from "../dist/lib/glob-search.js";
 import { grepSearch } from "../dist/lib/grep-search.js";
 import { applyMultiFilePatch, applyUnifiedPatchToText, isMultiFilePatch } from "../dist/lib/patch.js";
+import { decodeBase64Strict, isProxySyntheticIp, streamResponseBodyToFile } from "../dist/tools/filesystem.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -77,6 +79,63 @@ await run("edit replace_all simulation", async () => {
   await fs.writeFile(file, next);
   const result = await fs.readFile(file, "utf-8");
   if (result !== "baz bar baz") throw new Error(result);
+});
+
+await run("strict base64 accepts valid binary payload", async () => {
+  const decoded = decodeBase64Strict("AAEC/w==");
+  if (!decoded.equals(Buffer.from([0, 1, 2, 255]))) throw new Error("decoded bytes mismatch");
+});
+
+await run("strict base64 rejects malformed payload", async () => {
+  let threw = false;
+  try {
+    decodeBase64Strict("not@@base64");
+  } catch {
+    threw = true;
+  }
+  if (!threw) throw new Error("malformed base64 was accepted");
+});
+
+await run("strict base64 preserves real PNG binary bytes", async () => {
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlTtGQAAAAASUVORK5CYII=",
+    "base64"
+  );
+  const decoded = decodeBase64Strict(png.toString("base64"));
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (!decoded.equals(png)) throw new Error("PNG bytes changed during base64 round-trip");
+  if (!decoded.subarray(0, 8).equals(signature)) throw new Error("PNG signature mismatch");
+});
+
+await run("Clash fake-IP range is recognized without opening literal private IP URLs", async () => {
+  if (!isProxySyntheticIp("198.18.0.81")) throw new Error("198.18/15 fake IP was not recognized");
+  if (!isProxySyntheticIp("198.19.255.254")) throw new Error("198.19/15 fake IP was not recognized");
+  if (isProxySyntheticIp("198.20.0.1")) throw new Error("non fake-IP range was misclassified");
+  if (isProxySyntheticIp("10.0.0.1")) throw new Error("private LAN IP was misclassified as proxy synthetic");
+});
+
+await run("ChatGPT attachment response streams original bytes with SHA256", async () => {
+  const file = path.join(tmpDir, "chatgpt-stream.bin");
+  const payload = Buffer.concat([Buffer.from("chatgpt-file-transfer\n"), Buffer.alloc(256 * 1024, 0x5a)]);
+  const expectedSha256 = createHash("sha256").update(payload).digest("hex");
+  const response = new Response(payload, { headers: { "content-length": String(payload.length) } });
+  const result = await streamResponseBodyToFile(response, file, payload.length + 1);
+  const actual = await fs.readFile(file);
+  if (!actual.equals(payload)) throw new Error("streamed attachment bytes changed");
+  if (result.bytes !== payload.length) throw new Error(`streamed byte count ${result.bytes}`);
+  if (result.sha256 !== expectedSha256) throw new Error("streamed attachment SHA256 mismatch");
+});
+
+await run("ChatGPT attachment streaming enforces max byte limit", async () => {
+  const file = path.join(tmpDir, "chatgpt-stream-too-large.bin");
+  const response = new Response(Buffer.alloc(64, 0x41));
+  let threw = false;
+  try {
+    await streamResponseBodyToFile(response, file, 32);
+  } catch {
+    threw = true;
+  }
+  if (!threw) throw new Error("oversized attachment was accepted");
 });
 
 await run("multi-file patch detection", async () => {

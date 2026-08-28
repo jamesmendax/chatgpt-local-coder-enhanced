@@ -18,6 +18,7 @@ $TunnelExe = Join-Path $BinDir "tunnel-client.exe"
 $ProfileName = "codex-local"
 $ProfileDir = Join-Path $ScriptDir "profiles"
 $ProfileFile = Join-Path $ProfileDir "$ProfileName.yaml"
+$DefaultKeyFile = Join-Path $ScriptDir ".secrets\free-runtime-key.xml"
 $ZipName = "tunnel-client-$TUNNEL_VERSION-windows-amd64.zip"
 $DownloadUrl = "https://github.com/openai/tunnel-client/releases/download/$TUNNEL_VERSION/$ZipName"
 
@@ -28,6 +29,30 @@ function Get-DotEnvValue([string]$Name) {
     } | Select-Object -First 1
     if (-not $line) { return $null }
     return (($line -split "=", 2)[1].Trim()).Trim("'").Trim('"')
+}
+
+function Get-SavedApiKey([string]$KeyFile) {
+    $secureKey = $null
+    $keyPtr = [IntPtr]::Zero
+    try {
+        try {
+            $secureKey = Import-Clixml -LiteralPath $KeyFile
+        } catch {
+            throw "Saved Free Runtime API Key could not be decrypted for this Windows user: $KeyFile. Run save-free-key.cmd again."
+        }
+        if ($secureKey -isnot [System.Security.SecureString]) {
+            throw "Saved Free Runtime API Key is not a valid SecureString: $KeyFile. Run save-free-key.cmd again."
+        }
+        $keyPtr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($keyPtr)
+    } finally {
+        if ($keyPtr -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($keyPtr)
+        }
+        if ($secureKey) {
+            $secureKey.Dispose()
+        }
+    }
 }
 
 function Set-DotEnvValue([string]$Name, [string]$Value) {
@@ -146,18 +171,18 @@ function Test-McpServer([int]$TargetPort) {
 
 function Show-ConnectorGuide([string]$TunnelId, [int]$UiPort = 8080) {
     Write-Host ""
-    Write-Host "=== ChatGPT Connector (chi lam 1 lan) ===" -ForegroundColor Cyan
-    Write-Host "1. Giu terminal nay chay (tunnel-client)"
-    Write-Host "2. Mo: https://chatgpt.com/#settings/Connectors"
-    Write-Host "3. Them connector -> Connection: Tunnel -> chon 'my tunnel'"
-    Write-Host "   Hoac dan tunnel_id: $TunnelId"
-    Write-Host "4. Settings -> Apps -> dat quyen connector"
-    Write-Host "5. Refresh connector, mo chat moi"
+    Write-Host "=== ChatGPT MCP App setup ===" -ForegroundColor Cyan
+    Write-Host "1. Keep this tunnel-client terminal running."
+    Write-Host "2. In ChatGPT Business open Workspace Settings -> Apps."
+    Write-Host "3. Create a custom MCP app and select/configure this Secure MCP Tunnel."
+    Write-Host "   Tunnel ID: $TunnelId"
+    Write-Host "4. Run Scan Tools, create the draft, and test it in a new chat."
+    Write-Host "5. Publish only after the draft works."
+    Write-Host "   If tool names/schemas change later, create/re-publish the app so ChatGPT sees the new tool definition."
     Write-Host ""
-    Write-Host "Admin UI: http://127.0.0.1:$UiPort/ui" -ForegroundColor Green
-    Write-Host "Health:   http://127.0.0.1:$UiPort/readyz" -ForegroundColor Green
+    Write-Host "Tunnel health: http://127.0.0.1:$UiPort/readyz" -ForegroundColor Green
     Write-Host ""
-    Write-Host "LUU Y: Khong bam 'Luon cho phep' tren popup ChatGPT" -ForegroundColor Yellow
+    Write-Host "Security: never expose the MCP Admin UI port through the tunnel." -ForegroundColor Yellow
 }
 
 function Invoke-TunnelInit {
@@ -241,7 +266,12 @@ $resolvedPort = if ($Port -gt 0) { $Port } elseif ($envPort) { [int]$envPort } e
 $envHealth = Get-DotEnvValue "OPENAI_TUNNEL_HEALTH_PORT"
 $resolvedHealth = if ($HealthPort -gt 0) { $HealthPort } elseif ($envHealth) { [int]$envHealth } else { 8080 }
 $tunnelId = Get-DotEnvValue "OPENAI_TUNNEL_ID"
-$apiKey = Get-DotEnvValue "OPENAI_TUNNEL_API_KEY"
+$apiKey = if (Test-Path -LiteralPath $DefaultKeyFile -PathType Leaf) {
+    Write-Host "Using the encrypted Free Runtime API Key from $DefaultKeyFile" -ForegroundColor Green
+    Get-SavedApiKey -KeyFile $DefaultKeyFile
+} else {
+    Get-DotEnvValue "OPENAI_TUNNEL_API_KEY"
+}
 
 if (-not $tunnelId -or -not $apiKey) {
     Write-Host ""
@@ -250,7 +280,8 @@ if (-not $tunnelId -or -not $apiKey) {
     Write-Host ""
     Write-Host "Hoac them vao .env:" -ForegroundColor DarkGray
     Write-Host "  OPENAI_TUNNEL_ID=tunnel_..."
-    Write-Host "  OPENAI_TUNNEL_API_KEY=sk-..."
+    Write-Host "  OPENAI_TUNNEL_API_KEY=<YOUR_RUNTIME_API_KEY>"
+    Write-Host "Hoac luu key an toan 1 lan: .\save-free-key.cmd" -ForegroundColor Cyan
     exit 1
 }
 

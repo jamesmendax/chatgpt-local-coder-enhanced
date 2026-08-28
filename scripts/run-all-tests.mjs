@@ -87,8 +87,11 @@ server.stderr?.on("data", (d) => (serverLog += d));
 
 try {
   const health = await waitFor(`http://127.0.0.1:${mcpPort}/health`);
-  if (!health.instructions?.tool_profile) throw new Error("health missing instructions");
-  console.log(`OK  health: profile=${health.instructions.tool_profile}, memory=${health.instructions.memory_files?.length ?? 0} files`);
+  if (health.status !== "ok" || health.toolProfile !== "slim") throw new Error("public health invalid");
+  for (const privateField of ["workspace", "defaultCwd", "mcpEndpoints", "instructions"]) {
+    if (privateField in health) throw new Error(`public health leaks ${privateField}`);
+  }
+  console.log(`OK  public health: profile=${health.toolProfile}, auth=${health.auth}`);
 
   const admin = await waitFor(`http://127.0.0.1:${adminPort}/health`);
   if (!admin.instructions) throw new Error("admin health missing instructions");

@@ -4,17 +4,21 @@ export const MCP_QUICKSTART = `
 2. Call project_context(path) only for a different repo than WORKSPACE_PATH.
 3. Explore with glob (file names) and grep (content), then read_text_file.
 4. Edit with apply_patch (preferred), multi_edit, or write_file for new files.
-5. Run builds/tests with run_command (short) or start_process + process_output (long).
-6. Undo file edits with rewind (list → preview → restore). Shell/bash file changes are not tracked.
+5. For a file attached in ChatGPT use save_chatgpt_file (no Base64). For other binary transfer use read_file_base64 / write_file_base64; chunk large payloads and verify final SHA256 when possible.
+6. Run builds/tests with run_command (short) or start_process + process_status/process_output/stop_process (long).
+7. Undo file edits with rewind (list → preview → restore). Shell/bash file changes are not tracked.
 
 ## Output format
 All tools return JSON: { ok, tool, summary, data }
 
 ## Tool cheat sheet
 - glob / grep / read_text_file: explore (offset+limit for partial reads)
+- save_chatgpt_file: preferred path for ChatGPT conversation attachments; streams original bytes directly to disk
+- read_file_base64 / write_file_base64: binary transfer; prefer small chunks in ChatGPT web
 - apply_patch: single-file @@ hunks OR multi-file *** Begin Patch format
 - create_directory / delete_directory / copy_file / move_file / delete_file
 - run_command: persistent shell (cd persists); shell_status / shell_reset
+- start_process: long-running commands; follow with process_status / process_output / stop_process
 - git_status / git_diff / git_add / git_commit / git_branch / git_restore / git_stash
 - rewind: action=list|preview|restore|status — undo file edits via automatic checkpoints
 - enabled upstream MCP tools are exposed directly as <server>__<tool> (for example chrome-devtools__list_pages, linear__get_user); prefer direct tools

@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: startsWith(github.event.head_commit.message, 'release:')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          tag="v${version}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag already exists"
+            exit 0
+          fi
+          notes=".github/releases/${tag}.md"
+          if [ -f "$notes" ]; then
+            gh release create "$tag" \
+              --target "$GITHUB_SHA" \
+              --title "ChatGPT Local Coder Enhanced $tag" \
+              --notes-file "$notes" \
+              --latest
+          else
+            gh release create "$tag" \
+              --target "$GITHUB_SHA" \
+              --title "ChatGPT Local Coder Enhanced $tag" \
+              --generate-notes \
+              --latest
+          fi

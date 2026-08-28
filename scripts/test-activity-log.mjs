@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { appendActivity, getRecentActivity, logMcpRequest, summarizeToolArgs } from "../dist/lib/activity-log.js";
+import { appendActivity, getRecentActivity, logMcpRequest, redactSensitiveText, summarizeToolArgs } from "../dist/lib/activity-log.js";
 
 // summarizeToolArgs
 assert.equal(summarizeToolArgs("run_command", { command: "npm test" }), "npm test");
 assert.equal(summarizeToolArgs("read_text_file", { path: "C:\\foo.ts" }), "C:\\foo.ts");
+assert.equal(redactSensitiveText("OPENAI_API_KEY=sk-secret npm test"), "OPENAI_API_KEY=[REDACTED] npm test");
+assert.equal(redactSensitiveText("Authorization: Bearer abc.def-123"), "Authorization: Bearer [REDACTED]");
 
 // append + retrieve
 const before = getRecentActivity(500).length;
@@ -25,6 +27,8 @@ assert.ok(mcp, "expected mcp tools/call entry");
 assert.equal(mcp.client, "chatgpt");
 assert.equal(mcp.duration_ms, 42);
 assert.equal(mcp.summary, "/tmp/x");
+assert.deepEqual(mcp.details?.argument_keys, ["path"]);
+assert.equal("arguments" in (mcp.details || {}), false, "raw tool arguments must not be retained");
 
 // filter since
 const all = getRecentActivity(500);
