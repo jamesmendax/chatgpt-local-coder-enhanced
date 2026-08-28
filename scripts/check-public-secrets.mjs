@@ -51,6 +51,12 @@ function isSafePlaceholder(value) {
   if (/\bGet-DotEnvValue\b/i.test(raw)) return true;
   if (/\[Environment\]::GetEnvironmentVariable/i.test(raw)) return true;
 
+  // GitHub Actions injects these values at runtime. Allow only the built-in
+  // token reference and explicit repository secret references; literal token
+  // values are still caught by the direct token patterns above.
+  if (/^\$\{\{\s*github\.token\s*\}\}$/i.test(v)) return true;
+  if (/^\$\{\{\s*secrets\.[A-Za-z_][A-Za-z0-9_]*\s*\}\}$/i.test(v)) return true;
+
   return false;
 }
 
