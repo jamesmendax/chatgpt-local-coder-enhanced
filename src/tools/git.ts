@@ -6,31 +6,100 @@ import { audit } from "../lib/audit.js";
 import { requireWriteAllowed } from "../lib/permissions.js";
 import { toolAnnotations } from "../lib/tool-annotations.js";
 import { toolResult } from "../lib/tool-result.js";
+import { compactOutput } from "../lib/command-observation.js";
+import { createCommandLogFile, terminateProcessTree } from "../lib/persistent-shell.js";
+
+const MAX_GIT_CAPTURE_CHARS = Math.max(
+  20_000,
+  Number.parseInt(process.env.GIT_OUTPUT_MAX_CHARS || "200000", 10) || 200_000
+);
+
+function appendCapped(current: string, chunk: string): string {
+  const combined = current + chunk;
+  return combined.length <= MAX_GIT_CAPTURE_CHARS
+    ? combined
+    : combined.slice(combined.length - MAX_GIT_CAPTURE_CHARS);
+}
 
 interface GitRunResult {
   stdout: string;
   stderr: string;
   exit_code: number;
+  stdout_chars: number;
+  stderr_chars: number;
+  output_truncated: boolean;
+  full_output_path?: string;
 }
 
-function runGit(args: string[], cwd: string): Promise<GitRunResult> {
+function runGit(args: string[], cwd: string, timeoutMs = 120_000): Promise<GitRunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn("git", args, { cwd, windowsHide: true });
+    const log = createCommandLogFile(cwd);
+    log.stream?.write(`# cwd: ${cwd}\n# command: git ${args.join(" ")}\n# started: ${new Date().toISOString()}\n\n`);
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
-    child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
-    child.on("close", (code) => {
-      resolve({ stdout: stdout.trim(), stderr: stderr.trim(), exit_code: code ?? 1 });
+    let stdoutChars = 0;
+    let stderrChars = 0;
+    let settled = false;
+    let timedOut = false;
+
+    // git push/pull can block indefinitely on a credential prompt or network —
+    // without this deadline the tool call hangs forever.
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminateProcessTree(child);
+    }, timeoutMs);
+
+    const finish = (result: GitRunResult, trailer: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (!log.stream) {
+        resolve(result);
+        return;
+      }
+      log.stream.once("error", () => resolve(result));
+      log.stream.end(trailer, () => resolve(result));
+    };
+
+    child.stdout.on("data", (d: Buffer) => {
+      const chunk = d.toString();
+      stdoutChars += chunk.length;
+      stdout = appendCapped(stdout, chunk);
+      log.stream?.write(`[stdout]\n${chunk}`);
     });
-    child.on("error", () => reject(new Error("git not found. Install Git for Windows.")));
+    child.stderr.on("data", (d: Buffer) => {
+      const chunk = d.toString();
+      stderrChars += chunk.length;
+      stderr = appendCapped(stderr, chunk);
+      log.stream?.write(`[stderr]\n${chunk}`);
+    });
+    child.on("close", (code) => {
+      const exitCode = code ?? 1;
+      finish({
+        stdout: stdout.trim(),
+        stderr: timedOut ? `${stderr.trim()}${stderr.trim() ? "\n" : ""}git timed out after ${timeoutMs}ms (process tree terminated)`.trim() : stderr.trim(),
+        exit_code: timedOut ? 124 : exitCode,
+        stdout_chars: stdoutChars,
+        stderr_chars: stderrChars,
+        output_truncated: stdoutChars > stdout.length || stderrChars > stderr.length,
+        ...(log.path ? { full_output_path: log.path } : {}),
+      }, `\n# exit: ${exitCode}${timedOut ? " (timed_out: true)" : ""}\n`);
+    });
+    child.on("error", () => {
+      if (settled) return;
+      settled = true;
+      log.stream?.end("\n# spawn_error: git not found\n");
+      reject(new Error("git not found. Install Git for Windows."));
+    });
   });
 }
 
 async function gitOrThrow(args: string[], cwd: string): Promise<GitRunResult> {
   const result = await runGit(args, cwd);
   if (result.exit_code !== 0) {
-    throw new Error(result.stderr || result.stdout || `git exited with code ${result.exit_code}`);
+    const detail = compactOutput(result.stderr || result.stdout, 4_000).text;
+    throw new Error(detail || `git exited with code ${result.exit_code}`);
   }
   return result;
 }
@@ -46,8 +115,15 @@ export function registerGitTools(server: McpServer, defaultCwd: string): void {
   }, async ({ path: repoPath }) => {
     const cwd = await repo(repoPath);
     const r = await gitOrThrow(["status", "--short", "--branch"], cwd);
+    const output = compactOutput(r.stdout || "Clean working tree", 12_000);
     await audit({ tool: "git_status", action: "git", target: cwd, status: "ok" });
-    return toolResult("git_status", { path: cwd, output: r.stdout || "Clean working tree" });
+    return toolResult("git_status", {
+      path: cwd,
+      output: output.text,
+      output_truncated: output.truncated || r.output_truncated,
+      output_omitted_chars: output.omitted_chars,
+      full_output_path: r.full_output_path,
+    });
   });
 
   server.registerTool("git_diff", {
@@ -61,7 +137,17 @@ export function registerGitTools(server: McpServer, defaultCwd: string): void {
     if (staged) args.push("--staged");
     if (file) args.push("--", file);
     const r = await gitOrThrow(args, cwd);
-    return toolResult("git_diff", { path: cwd, staged, file, output: r.stdout || "No changes" });
+    const output = compactOutput(r.stdout || "No changes", 16_000);
+    await audit({ tool: "git_diff", action: "git", target: cwd, status: "ok", details: { staged, file } });
+    return toolResult("git_diff", {
+      path: cwd,
+      staged,
+      file,
+      output: output.text,
+      output_truncated: output.truncated || r.output_truncated,
+      output_omitted_chars: output.omitted_chars,
+      full_output_path: r.full_output_path,
+    });
   });
 
   server.registerTool("git_log", {

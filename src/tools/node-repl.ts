@@ -113,7 +113,22 @@ export function registerNodeReplTool(server: McpServer, workspaceRoot: string): 
       const output = state.context.__localCoderOutput as string[];
       output.length = 0;
       try {
-        const value = await vm.runInContext(`(async () => { ${code}\n})()`, state.context, { timeout: timeout_ms }) as Promise<unknown>;
+        const evalPromise = vm.runInContext(`(async () => { ${code}\n})()`, state.context, { timeout: timeout_ms }) as Promise<unknown>;
+        // The vm timeout only bounds synchronous execution — an async eval that
+        // never settles would hang the tool call (and the goal turn) forever.
+        evalPromise.catch(() => {});
+        let value: unknown;
+        let deadline: NodeJS.Timeout | undefined;
+        try {
+          value = await Promise.race([
+            evalPromise,
+            new Promise<never>((_, rejectTimeout) => {
+              deadline = setTimeout(() => rejectTimeout(new Error(`node_repl eval exceeded ${timeout_ms}ms (async code still pending)`)), timeout_ms);
+            }),
+          ]);
+        } finally {
+          if (deadline) clearTimeout(deadline);
+        }
         return toolResult("node_repl", {
           output: output.join("\n"),
           value: value === undefined ? undefined : util.inspect(value, { depth: 5, maxArrayLength: 100 }),

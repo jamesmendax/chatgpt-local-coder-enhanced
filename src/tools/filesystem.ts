@@ -16,11 +16,91 @@ import { enrichAfterEdit } from "../lib/edit-enrichment.js";
 import { toolResult } from "../lib/tool-result.js";
 import { globFiles } from "../lib/glob-search.js";
 import { grepSearch } from "../lib/grep-search.js";
+import { loadPathRulesForFile } from "../lib/path-rules.js";
 
 const MAX_BINARY_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_BASE64_CHARS = Math.ceil(MAX_BINARY_CHUNK_BYTES / 3) * 4;
 const MAX_CHATGPT_FILE_BYTES = 512 * 1024 * 1024;
 const MAX_DOWNLOAD_REDIRECTS = 5;
+const MAX_TEXT_FILE_BYTES = Math.max(
+  64 * 1024,
+  Number.parseInt(process.env.READ_TEXT_MAX_FILE_BYTES || "33554432", 10) || 32 * 1024 * 1024
+);
+const MAX_TEXT_RESULT_CHARS = Math.max(
+  10_000,
+  Number.parseInt(process.env.READ_TEXT_MAX_CHARS || "50000", 10) || 50_000
+);
+const MAX_TEXT_RESULT_LINES = Math.max(
+  100,
+  Number.parseInt(process.env.READ_TEXT_MAX_LINES || "1000", 10) || 1_000
+);
+const MAX_DIRECTORY_ENTRIES = Math.max(
+  100,
+  Number.parseInt(process.env.LIST_DIRECTORY_MAX_ENTRIES || "500", 10) || 500
+);
+
+function boundedLines(
+  lines: string[],
+  start: number,
+  end: number,
+  numbered: boolean
+): {
+  content: string;
+  lines_read: number;
+  truncated: boolean;
+  next_offset: number | null;
+  single_line_truncated: boolean;
+} {
+  const output: string[] = [];
+  const boundedEnd = Math.min(end, lines.length, start + MAX_TEXT_RESULT_LINES);
+  let index = start;
+  let chars = 0;
+  let singleLineTruncated = false;
+
+  for (; index < boundedEnd; index++) {
+    const rendered = numbered
+      ? `${String(index + 1).padStart(6, " ")}|${lines[index]}`
+      : lines[index];
+    const extra = rendered.length + (output.length ? 1 : 0);
+    if (chars + extra > MAX_TEXT_RESULT_CHARS) {
+      if (output.length === 0) {
+        output.push(rendered.slice(0, MAX_TEXT_RESULT_CHARS));
+        singleLineTruncated = true;
+        index++;
+      }
+      break;
+    }
+    output.push(rendered);
+    chars += extra;
+  }
+
+  const truncated = index < end;
+  return {
+    content: output.join("\n"),
+    lines_read: Math.max(0, index - start),
+    truncated,
+    next_offset: truncated ? index + 1 : null,
+    single_line_truncated: singleLineTruncated,
+  };
+}
+
+function boundedTail(lines: string[], requested: number): {
+  content: string;
+  lines_read: number;
+  truncated: boolean;
+  start_offset: number;
+} {
+  const lineCount = Math.min(requested, MAX_TEXT_RESULT_LINES, lines.length);
+  const start = Math.max(0, lines.length - lineCount);
+  const raw = lines.slice(start).join("\n");
+  const content = raw.length > MAX_TEXT_RESULT_CHARS ? raw.slice(-MAX_TEXT_RESULT_CHARS) : raw;
+  return {
+    content,
+    lines_read: lineCount,
+    truncated: requested > lineCount || raw.length > MAX_TEXT_RESULT_CHARS,
+    start_offset: start + 1,
+  };
+}
 
 const chatGptFileSchema = z.object({
   file_id: z.string().min(1),
@@ -288,12 +368,12 @@ async function buildTree(dirPath: string, depth: number, maxDepth: number): Prom
   return { name, type: "directory", children };
 }
 
-export function registerFilesystemTools(server: McpServer): void {
+export function registerFilesystemTools(server: McpServer, workspaceRoot: string): void {
   server.registerTool(
     "read_text_file",
     {
       title: "Read Text File",
-      description: "Read a file before editing. Use offset+limit for partial reads (1-based line numbers). Always read files you plan to patch.",
+      description: "Read a file before editing. Use offset+limit for partial reads (1-based line numbers). Results are bounded; continue from next_offset. Very large text files require grep or targeted shell extraction. The first chunk also returns nested AGENTS/CLAUDE and path-scoped rules for this file.",
       inputSchema: {
         path: z.string(),
         offset: z.number().int().positive().optional().describe("1-based line number to start reading"),
@@ -306,22 +386,75 @@ export function registerFilesystemTools(server: McpServer): void {
     },
     async ({ path: filePath, offset, limit, head, tail }) => {
       const validPath = await validatePath(filePath);
+      const stat = await fs.stat(validPath);
+      if (!stat.isFile()) throw new Error("Path is not a regular file");
+      if (stat.size > MAX_TEXT_FILE_BYTES) {
+        throw new Error(
+          `Text file is ${stat.size} bytes, above READ_TEXT_MAX_FILE_BYTES=${MAX_TEXT_FILE_BYTES}. Use grep, read_file_base64 chunks, or run_command with targeted extraction instead of loading the whole file.`
+        );
+      }
       const content = await fs.readFile(validPath, "utf-8");
       const lines = content.split("\n");
+      const includeApplicableInstructions = tail === undefined && (offset === undefined || offset <= 1);
+      const applicableInstructions = includeApplicableInstructions
+        ? (await loadPathRulesForFile(workspaceRoot, validPath)).filter(
+            (rule) => rule.path !== validPath && (rule.kind === "path_rule" || rule.depth > 0)
+          )
+        : [];
+      const instructionData = applicableInstructions.length
+        ? {
+            applicable_instructions: applicableInstructions,
+            applicable_instruction_count: applicableInstructions.length,
+          }
+        : {};
 
       if (offset !== undefined) {
         const start = Math.max(0, offset - 1);
         const end = limit !== undefined ? start + limit : lines.length;
-        const slice = lines.slice(start, end);
-        const numbered = slice.map((line, idx) => `${String(start + idx + 1).padStart(6, " ")}|${line}`);
+        const bounded = boundedLines(lines, start, end, true);
         await audit({ tool: "read_text_file", action: "read", target: validPath, status: "ok", details: { offset, limit } });
-        return toolResult("read_text_file", { path: validPath, content: numbered.join("\n"), offset, limit, lines: slice.length });
+        return toolResult("read_text_file", {
+          path: validPath,
+          content: bounded.content,
+          offset,
+          limit,
+          lines: bounded.lines_read,
+          total_lines: lines.length,
+          truncated: bounded.truncated,
+          next_offset: bounded.next_offset,
+          single_line_truncated: bounded.single_line_truncated,
+          ...instructionData,
+        });
       }
 
-      const result =
-        head !== undefined ? lines.slice(0, head).join("\n") : tail !== undefined ? lines.slice(-tail).join("\n") : content;
+      if (tail !== undefined) {
+        const bounded = boundedTail(lines, Math.max(0, Math.floor(tail)));
+        await audit({ tool: "read_text_file", action: "read", target: validPath, status: "ok", details: { tail } });
+        return toolResult("read_text_file", {
+          path: validPath,
+          content: bounded.content,
+          tail,
+          lines: bounded.lines_read,
+          total_lines: lines.length,
+          truncated: bounded.truncated,
+          start_offset: bounded.start_offset,
+        });
+      }
+
+      const end = head !== undefined ? Math.min(lines.length, Math.max(0, Math.floor(head))) : lines.length;
+      const bounded = boundedLines(lines, 0, end, false);
       await audit({ tool: "read_text_file", action: "read", target: validPath, status: "ok" });
-      return toolResult("read_text_file", { path: validPath, content: result, head, tail });
+      return toolResult("read_text_file", {
+        path: validPath,
+        content: bounded.content,
+        head,
+        lines: bounded.lines_read,
+        total_lines: lines.length,
+        truncated: bounded.truncated,
+        next_offset: bounded.next_offset,
+        single_line_truncated: bounded.single_line_truncated,
+        ...instructionData,
+      });
     }
   );
 
@@ -832,10 +965,21 @@ export function registerFilesystemTools(server: McpServer): void {
       const ignoreMatchers = (ignore || []).map(
         (p) => new RegExp("^" + p.replace(/\./g, "\\.").replace(/\*/g, ".*").replace(/\?/g, ".") + "$", "i")
       );
-      const filtered = entries.filter((e) => !ignoreMatchers.some((m) => m.test(e.name)));
-      const items = filtered.map((e) => ({ name: e.name, type: e.isDirectory() ? "directory" : "file" }));
+      const filtered = entries
+        .filter((e) => !ignoreMatchers.some((m) => m.test(e.name)))
+        .sort((left, right) => Number(right.isDirectory()) - Number(left.isDirectory()) || left.name.localeCompare(right.name));
+      const items = filtered
+        .slice(0, MAX_DIRECTORY_ENTRIES)
+        .map((e) => ({ name: e.name, type: e.isDirectory() ? "directory" : "file" }));
       await audit({ tool: "list_directory", action: "list", target: validPath, status: "ok" });
-      return toolResult("list_directory", { path: validPath, entries: items, count: items.length });
+      return toolResult("list_directory", {
+        path: validPath,
+        entries: items,
+        count: items.length,
+        total_entries: filtered.length,
+        truncated: filtered.length > items.length,
+        omitted_entries: Math.max(0, filtered.length - items.length),
+      });
     }
   );
 

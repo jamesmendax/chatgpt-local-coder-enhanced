@@ -98,21 +98,31 @@ await run("tools/list with valid session", async () => {
   listedTools = json?.result?.tools || [];
   listedToolNames = listedTools.map((t) => t.name);
   for (const required of [
+    "read_text_file",
+    "write_file",
+    "apply_patch",
+    "glob",
+    "grep",
     "run_command",
+    "start_process",
+    "process_status",
+    "process_output",
+    "stop_process",
     "read_file_base64",
     "file_info",
     "write_file_base64",
     "save_chatgpt_file",
-    "create_directory",
-    "copy_file",
-    "move_file",
-    "delete_file",
-    "shell_reset",
-    "process_status",
-    "process_output",
-    "stop_process",
+    "git_status",
+    "git_diff",
+    "project_context",
+    "task_state",
+    "visual_review",
+    "rewind",
   ]) {
     if (!listedToolNames.includes(required)) throw new Error(`${required} not in tools/list`);
+  }
+  for (const hidden of ["create_directory", "copy_file", "move_file", "delete_file", "shell_reset", "git_commit"]) {
+    if (listedToolNames.includes(hidden)) throw new Error(`${hidden} should be hidden in slim tools/list`);
   }
 
   const saveTool = listedTools.find((tool) => tool.name === "save_chatgpt_file");

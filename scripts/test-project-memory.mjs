@@ -28,7 +28,7 @@ try {
     adminPort: 3001,
   });
 
-  if (!ctx.instructionsText.includes("Agent workflow")) {
+  if (!ctx.instructionsText.includes("## Local work")) {
     throw new Error("missing agent prompt");
   }
   ok("agent prompt in instructions");

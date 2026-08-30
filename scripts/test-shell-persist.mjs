@@ -36,6 +36,43 @@ try {
   const cwd2 = getShellStatus().cwd;
   if (cwd2 !== cwd1) throw new Error(`persist failed: ${cwd1} -> ${cwd2}`);
   ok("cwd restored after re-bootstrap");
+
+  const oneOff = await execInShellSession(
+    `node -e "console.log(process.cwd())"`,
+    root,
+    5000,
+    root
+  );
+    const expectedRoot = path.resolve(root).split(path.sep).join("/");
+  if (!oneOff.stdout.replace(/\\/g, "/").endsWith(expectedRoot)) {
+    throw new Error(`working_directory did not apply: ${oneOff.stdout}`);
+  }
+  if (getShellStatus().cwd !== cwd1) throw new Error("working_directory unexpectedly changed persistent cwd");
+  ok("working_directory is a one-off override");
+
+  const compound = await execInShellSession(
+    `node -e "process.exit(7)" && node -e "console.log('should-not-run')"`,
+    root,
+    5000,
+    root
+  );
+  if (compound.exit_code === 0) throw new Error("failed compound command reported exit 0");
+  if (compound.stdout.includes("should-not-run")) throw new Error("&& executed command after failure");
+  if (!compound.full_output_path) throw new Error("command did not persist full output log");
+  await fs.stat(compound.full_output_path);
+  if (typeof compound.duration_ms !== "number") throw new Error("command duration missing");
+  ok(`compound failure preserved as exit ${compound.exit_code}`);
+
+  const timedOut = await execInShellSession(
+    `node -e "setTimeout(()=>{},5000)"`,
+    root,
+    200,
+    root
+  );
+  if (!timedOut.timed_out || timedOut.exit_code !== null) throw new Error("timeout did not return structured failure");
+  if (!timedOut.stderr.includes("timed out")) throw new Error("timeout diagnostic missing");
+  await fs.stat(timedOut.full_output_path);
+  ok("timeout returns structured evidence and a full log");
 } catch (e) {
   fail("shell persist", e.message || e);
 }

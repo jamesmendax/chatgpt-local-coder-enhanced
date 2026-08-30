@@ -16,14 +16,19 @@ function memoryPath(workspaceRoot: string): string {
   return path.join(projectDir(workspaceRoot), "MEMORY.md");
 }
 
-export async function loadAutoMemory(workspaceRoot: string): Promise<string | null> {
+export async function loadAutoMemory(
+  workspaceRoot: string,
+  opts?: { maxBytes?: number; maxLines?: number }
+): Promise<string | null> {
   try {
     const buf = await fs.readFile(memoryPath(workspaceRoot));
     const text = buf.toString("utf-8");
-    const lines = text.split(/\r?\n/).slice(0, MAX_LINES).join("\n");
+    const maxBytes = opts?.maxBytes ?? MAX_BYTES;
+    const maxLines = opts?.maxLines ?? MAX_LINES;
+    const lines = text.split(/\r?\n/).slice(0, maxLines).join("\n");
     const limited =
-      Buffer.byteLength(lines, "utf-8") > MAX_BYTES
-        ? Buffer.from(lines, "utf-8").subarray(0, MAX_BYTES).toString("utf-8")
+      Buffer.byteLength(lines, "utf-8") > maxBytes
+        ? Buffer.from(lines, "utf-8").subarray(0, maxBytes).toString("utf-8")
         : lines;
     return limited.trim() || null;
   } catch {

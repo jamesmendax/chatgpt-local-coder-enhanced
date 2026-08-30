@@ -1,9 +1,7 @@
 {
   "name": "chatgpt-local-coder-enhanced",
-  "version": "1.2.0",
-  "private": true,
+  "version": "1.3.0",
   "description": "Enhanced self-hosted MCP server for ChatGPT with local filesystem, shell, git, checkpoints, direct attachment saving, and verified binary-file capabilities.",
-  "author": "hoangcoderr and contributors; enhanced fork maintained by jamesmendax",
   "repository": {
     "type": "git",
     "url": "https://github.com/jamesmendax/chatgpt-local-coder-enhanced.git"
@@ -12,6 +10,7 @@
   "bugs": {
     "url": "https://github.com/jamesmendax/chatgpt-local-coder-enhanced/issues"
   },
+  "author": "hoangcoderr and contributors; enhanced fork maintained by jamesmendax",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -19,15 +18,19 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "tsc && node scripts/test-patch.mjs && node scripts/test-tools.mjs && node scripts/test-checkpoints.mjs && node scripts/test-mcp-upstream.mjs && node scripts/test-mcp-oauth.mjs && node scripts/test-activity-log.mjs && node scripts/test-project-memory.mjs && node scripts/test-tool-profile.mjs && node scripts/test-shell-persist.mjs",
+    "test": "tsc && node scripts/test-patch.mjs && node scripts/test-tools.mjs && node scripts/test-checkpoints.mjs && node scripts/test-mcp-upstream.mjs && node scripts/test-mcp-oauth.mjs && node scripts/test-activity-log.mjs && node scripts/test-project-memory.mjs && node scripts/test-context-bundle.mjs && node scripts/test-path-rules.mjs && node scripts/test-durable-tasks.mjs && node scripts/test-command-observation.mjs && node scripts/test-runtime-manifest.mjs && node scripts/test-tool-profile.mjs && node scripts/test-shell-persist.mjs && node scripts/test-agent-harness.mjs && node scripts/test-visual-review.mjs && node scripts/test-office-visual-review.mjs",
     "test:all": "node scripts/run-all-tests.mjs",
     "test:integration": "tsc && node scripts/test-mcp-bridge-integration.mjs",
-    "check:secrets": "node scripts/check-public-secrets.mjs",
-    "verify": "npm run check:secrets && npm run test:all",
+    "eval:list": "node scripts/agent-eval.mjs list",
+    "eval:prepare": "node scripts/agent-eval.mjs prepare",
+    "eval:grade": "node scripts/agent-eval.mjs grade",
+    "eval:selftest": "npm run build && node scripts/agent-eval.mjs selftest",
     "init-claude-md": "node scripts/init-claude-md.mjs",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "tunnel": "cloudflared tunnel --url http://localhost:3000"
+    "tunnel": "cloudflared tunnel --url http://localhost:3000",
+    "check:secrets": "node scripts/check-public-secrets.mjs",
+    "verify": "npm run check:secrets && npm run test:all"
   },
   "keywords": [
     "mcp",
@@ -36,21 +39,18 @@
     "model-context-protocol",
     "local-development",
     "filesystem",
-    "binary-files",
     "git",
     "apply-patch",
     "developer-mode",
     "openai-tunnel"
   ],
   "license": "MIT",
-  "engines": {
-    "node": ">=20"
-  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "playwright-core": "1.62.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {

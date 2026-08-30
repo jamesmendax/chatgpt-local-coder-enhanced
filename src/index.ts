@@ -26,6 +26,7 @@ import {
   type InstructionContext,
 } from "./lib/instruction-context.js";
 import { getChatGptToolProfile } from "./lib/tool-profile.js";
+import { getRuntimeManifest, getRuntimeManifestSummary } from "./lib/runtime-manifest.js";
 
 function intEnv(name: string, fallback: number, min: number, max: number): number {
   const parsed = Number.parseInt(process.env[name] || "", 10);
@@ -107,6 +108,10 @@ console.log(
   `[MCP] MCP instructions: ${Math.round(instructionContext.instructionBytes / 1024)}KB (agent prompt + env + git + memory)`
 );
 console.log(`[MCP] Tool profile: ${getChatGptToolProfile()} (CHATGPT_TOOL_PROFILE)`);
+const startupManifest = getRuntimeManifest();
+console.log(
+  `[MCP] Runtime build: ${startupManifest.build_id}; local tools: ${startupManifest.tool_count}; manifest: ${startupManifest.tool_manifest_hash.slice(0, 12)}`
+);
 
 const sessionManager = createSessionManager({
   workspaceRoot,
@@ -203,6 +208,7 @@ app.get("/health", (_req, res) => {
     auth: MCP_TOKEN ? "path-token" : "none",
     toolProfile: getChatGptToolProfile(),
     sessionRecovery: SESSION_RECOVERY,
+    runtime: getRuntimeManifestSummary(),
   });
 });
 
@@ -351,6 +357,8 @@ const server = app.listen(PORT, HOST, () => {
   console.log(`  Session recovery: ${SESSION_RECOVERY ? "ON" : "OFF"}`);
   console.log(`  Auth:      ${MCP_TOKEN ? "ON (MCP_TOKEN in URL path)" : "OFF — dat MCP_TOKEN trong .env!"}`);
   console.log(`  PID:       ${process.pid}`);
+  console.log(`  Build:     ${startupManifest.build_id}`);
+  console.log(`  Tools:     ${startupManifest.tool_count} (${startupManifest.tool_manifest_hash.slice(0, 12)})`);
   console.log("========================================");
   console.log("  Dang chay... (Ctrl+C de dung)");
   console.log("========================================");
@@ -369,13 +377,29 @@ server.on("error", (err: NodeJS.ErrnoException) => {
   process.exit(1);
 });
 
-process.on("SIGINT", () => {
-  console.log("\n[DUNG] Server dang tat...");
+let shuttingDown = false;
+
+function shutdownServer(signal: string): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n[DUNG] Server dang tat... (${signal})`);
   sessionManager.stopCleanup();
   void upstreamManager.shutdown();
   adminServer.close();
-  server.close(() => process.exit(0));
-});
+  const forceTimer = setTimeout(() => {
+    console.warn("[DUNG] Active request did not drain; forcing HTTP connections closed.");
+    server.closeAllConnections?.();
+    process.exit(0);
+  }, 8_000);
+  forceTimer.unref?.();
+  server.close(() => {
+    clearTimeout(forceTimer);
+    process.exit(0);
+  });
+}
+
+process.on("SIGINT", () => shutdownServer("SIGINT"));
+process.on("SIGTERM", () => shutdownServer("SIGTERM"));
 
 // Tranh process tu tat khi stdin dong (Windows)
 if (process.stdin.isTTY) {

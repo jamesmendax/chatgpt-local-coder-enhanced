@@ -59,8 +59,20 @@ const unitScripts = [
   "scripts/test-checkpoints.mjs",
   "scripts/test-activity-log.mjs",
   "scripts/test-project-memory.mjs",
+  "scripts/test-context-bundle.mjs",
+  "scripts/test-harness-v2.mjs",
+  "scripts/test-path-rules.mjs",
+  "scripts/test-goal-mode.mjs",
+  "scripts/test-durable-tasks.mjs",
+  "scripts/test-command-observation.mjs",
+  "scripts/test-repeat-guard.mjs",
+  "scripts/test-projection-replay.mjs",
+  "scripts/test-runtime-manifest.mjs",
   "scripts/test-tool-profile.mjs",
   "scripts/test-shell-persist.mjs",
+  "scripts/test-agent-harness.mjs",
+  "scripts/test-visual-review.mjs",
+  "scripts/test-office-visual-review.mjs",
 ];
 
 console.log("\n=== Unit tests ===");
@@ -91,6 +103,9 @@ server.stderr?.on("data", (d) => (serverLog += d));
 try {
   const health = await waitFor(`http://127.0.0.1:${mcpPort}/health`);
   if (health.status !== "ok" || health.toolProfile !== "slim") throw new Error("public health invalid");
+  if (health.runtime?.tool_count !== 27) throw new Error(`health runtime tool count invalid: ${health.runtime?.tool_count}`);
+  if (health.runtime?.stale_build !== false) throw new Error("temporary server started with stale build");
+  if (!/^[a-f0-9]{16}$/.test(health.runtime?.build_id || "")) throw new Error("health runtime build id invalid");
   for (const privateField of ["workspace", "defaultCwd", "mcpEndpoints", "instructions"]) {
     if (privateField in health) throw new Error(`public health leaks ${privateField}`);
   }
@@ -101,7 +116,7 @@ try {
   console.log("OK  admin health");
 
   const preview = await (await fetch(`http://127.0.0.1:${adminPort}/api/instructions/preview`)).json();
-  if (!preview.preview?.includes("Agent workflow")) throw new Error("instructions preview missing agent prompt");
+  if (!preview.preview?.includes("## Local work")) throw new Error("instructions preview missing agent prompt");
   console.log(`OK  instructions preview ${preview.total_chars} chars`);
 
   // MCP session + tools/list count
@@ -131,13 +146,22 @@ try {
   const listText = await listRes.text();
   const listJson = JSON.parse(listText);
   const tools = listJson?.result?.tools || [];
-  const bytes = Buffer.byteLength(listText, "utf-8");
+  // Measure the tools payload, not the raw JSON-RPC envelope text — the
+  // protocol framing is not tool-surface growth and drifts between clients.
+  const bytes = Buffer.byteLength(JSON.stringify({ tools }), "utf-8");
   console.log(`OK  tools/list: ${tools.length} tools, ${Math.round(bytes / 1024)}KB`);
+  if (tools.length !== 27) throw new Error(`expected 27 slim tools, got ${tools.length}`);
+  if (bytes > 23_000) throw new Error(`slim tools/list budget exceeded: ${bytes} bytes`);
   if (tools.length > 30) console.warn(`WARN tools/list has ${tools.length} tools — consider slim profile`);
   if (!tools.some((t) => t.name === "apply_patch")) throw new Error("apply_patch missing");
+  if (!tools.some((t) => t.name === "visual_review")) throw new Error("visual_review missing from slim tools/list");
+  if (!tools.some((t) => t.name === "goal")) throw new Error("goal missing from slim tools/list");
+  if (tools.some((t) => t.name === "open_image")) throw new Error("legacy open_image should be hidden from slim tools/list");
+  if (tools.some((t) => t.outputSchema)) throw new Error("slim tools/list repeats generic outputSchema");
+  console.log("OK  slim omits repeated generic output schemas");
 
   // ChatGPT web may initialize a fresh MCP session for each tool call. Verify
-  // retained sessions stay bounded without breaking stale-session recovery.
+  // the server bounds retained sessions without breaking stale-session recovery.
   const retentionSessions = [];
   for (let i = 0; i < 12; i++) {
     const res = await fetch(`http://127.0.0.1:${mcpPort}/mcp`, {

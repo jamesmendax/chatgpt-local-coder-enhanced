@@ -1,12 +1,13 @@
 export const MCP_QUICKSTART = `
 ## Tool workflow (when agent_status is called)
 1. Project memory + git state are already in MCP instructions from WORKSPACE_PATH.
-2. Call project_context(path) only for a different repo than WORKSPACE_PATH.
+2. For another repo, call project_context(path, query) to receive only task-relevant instructions; call mode=full only when exact full documents are needed.
 3. Explore with glob (file names) and grep (content), then read_text_file.
-4. Edit with apply_patch (preferred), multi_edit, or write_file for new files.
+4. Edit existing files with apply_patch; use write_file for new files. Use run_command for deterministic file moves/deletes or Git mutations.
 5. For a file attached in ChatGPT use save_chatgpt_file (no Base64). For other binary transfer use read_file_base64 / write_file_base64; chunk large payloads and verify final SHA256 when possible.
 6. Run builds/tests with run_command (short) or start_process + process_status/process_output/stop_process (long).
-7. Undo file edits with rewind (list → preview → restore). Shell/bash file changes are not tracked.
+7. When appearance matters, call visual_review on the actual artifact; after a focused fix, call it again with compare_to=<prior review_id>.
+8. Undo file edits with rewind (list → preview → restore). Shell/bash file changes are not tracked.
 
 ## Output format
 All tools return JSON: { ok, tool, summary, data }
@@ -16,14 +17,15 @@ All tools return JSON: { ok, tool, summary, data }
 - save_chatgpt_file: preferred path for ChatGPT conversation attachments; streams original bytes directly to disk
 - read_file_base64 / write_file_base64: binary transfer; prefer small chunks in ChatGPT web
 - apply_patch: single-file @@ hunks OR multi-file *** Begin Patch format
-- create_directory / delete_directory / copy_file / move_file / delete_file
-- run_command: persistent shell (cd persists); shell_status / shell_reset
+- run_command: persistent shell (cd persists); shell_status shows the current cwd and recent commands
 - start_process: long-running commands; follow with process_status / process_output / stop_process
-- git_status / git_diff / git_add / git_commit / git_branch / git_restore / git_stash
+- visual_review: universal review for image/SVG/web/PDF/PPTX/DOCX with focus crops, diagnostics, comparison, and freshness tracking
+- task_state: compact long-task checkpoint; tool calls automatically add failures, checks, and changed files while active
+- full profile also contains experimental visual/browser/task tools; they stay hidden from ChatGPT web slim unless explicitly enabled
+- git_status / git_diff: structured inspection; use run_command for commit, restore, branch, and other Git mutations
 - rewind: action=list|preview|restore|status — undo file edits via automatic checkpoints
 - enabled upstream MCP tools are exposed directly as <server>__<tool> (for example chrome-devtools__list_pages, linear__get_user); prefer direct tools
-- mcp_servers / mcp_tools / mcp_call — upstream diagnostics/fallback when a direct proxy is unavailable
-- git_push / git_checkout / delete_directory: may be blocked by ChatGPT safety — use run_command fallback
+- full profile keeps legacy convenience, browser, task-detail, and upstream-diagnostic tools; slim intentionally exposes one preferred path per operation
 
 ## apply_patch — single file
 @@
@@ -59,7 +61,7 @@ export function buildServerInstructions(
     "## Quick pointers",
     `Workspace roots: ${workspaceRoots.join("; ")}`,
     "agent_status — full tool cheat sheet + apply_patch format",
-    "project_context(path) — load CLAUDE.md from another repo",
+    "project_context(path, query) — compact project map or task-relevant instruction bundle",
   ].join("\n");
 
   const body = contextBlock?.trim();

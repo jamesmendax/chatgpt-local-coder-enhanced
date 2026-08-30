@@ -14,6 +14,16 @@ import { appendAutoMemory } from "../lib/auto-memory.js";
 import { loadPathRulesForFile } from "../lib/path-rules.js";
 import { toolResult } from "../lib/tool-result.js";
 import { loadProjectSkill, loadProjectSkills } from "../lib/skills-loader.js";
+import {
+  buildContextMap,
+  selectRelevantContext,
+  type ContextSourceFile,
+} from "../lib/context-bundle.js";
+import { getBrowserRuntimeStatus } from "./browser.js";
+import { getManagedProcessRuntimeStatus } from "./shell.js";
+import { getRuntimeManifest } from "../lib/runtime-manifest.js";
+import { buildHarnessRuntimeContext } from "../lib/context-broker.js";
+import { appendHarnessEventSafe, getHarnessEventLogHealth } from "../lib/harness-events.js";
 
 
 
@@ -104,31 +114,86 @@ export function registerContextTools(server: McpServer, workspaceRoot: string): 
     {
       title: "Project Context",
       description:
-        "Load CLAUDE.md/AGENTS.md for a project path. Use when the task targets a repo other than WORKSPACE_PATH (default project is already in MCP instructions).",
+        "Return a compact project map or a task-relevant context bundle from AGENTS.md/CLAUDE.md/README/config files. Prefer query + relevant; use full only when exact complete text is necessary.",
       inputSchema: {
         path: z.string().optional().describe("Project directory, defaults to primary workspace"),
         max_depth: z.number().int().min(0).max(5).optional().default(3),
         max_bytes_per_file: z.number().int().positive().max(200000).optional().default(60000),
+        query: z.string().max(4000).optional().describe("Current task or question used to select relevant sections"),
+        mode: z.enum(["map", "relevant", "full"]).optional().describe("Defaults to relevant when query is supplied, otherwise map"),
+        max_total_bytes: z.number().int().min(2000).max(50000).optional().default(12000),
+        max_chunks: z.number().int().min(1).max(24).optional().default(10),
       },
 
       annotations: toolAnnotations("read"),
     },
-    async ({ path: projectPath, max_depth, max_bytes_per_file }) => {
+    async ({ path: projectPath, max_depth, max_bytes_per_file, query, mode, max_total_bytes, max_chunks }) => {
       const root = projectPath ? await validatePath(projectPath) : workspaceRoot;
       const files = await findContextFiles(root, max_depth);
-      const fileContents: Array<{ path: string; content: string; truncated: boolean }> = [];
+      const sources: ContextSourceFile[] = [];
 
       for (const file of files) {
         try {
           const buf = await fs.readFile(file);
           const truncated = buf.length > max_bytes_per_file;
           const text = buf.subarray(0, max_bytes_per_file).toString("utf-8");
-          fileContents.push({ path: file, content: text, truncated });
+          sources.push({ path: file, content: text, truncated, bytes: buf.length });
         } catch {}
       }
 
-      await audit({ tool: "project_context", action: "read", target: root, status: "ok", details: { files: files.length } });
-      return toolResult("project_context", { root, files: fileContents, count: fileContents.length });
+      const effectiveMode = mode ?? (query?.trim() ? "relevant" : "map");
+      await audit({
+        tool: "project_context",
+        action: "read",
+        target: root,
+        status: "ok",
+        details: { files: sources.length, mode: effectiveMode, query: query?.slice(0, 200) },
+      });
+
+      if (effectiveMode === "full") {
+        return toolResult("project_context", {
+          root,
+          mode: effectiveMode,
+          files: sources.map(({ bytes, ...file }) => ({ ...file, bytes })),
+          count: sources.length,
+          total_bytes: sources.reduce((sum, file) => sum + Buffer.byteLength(file.content, "utf-8"), 0),
+        });
+      }
+
+      if (effectiveMode === "map") {
+        return toolResult("project_context", {
+          root,
+          mode: effectiveMode,
+          files: buildContextMap(root, sources),
+          count: sources.length,
+        });
+      }
+
+      if (!query?.trim()) throw new Error("project_context mode=relevant requires query");
+      const bundle = selectRelevantContext(root, sources, query, {
+        maxTotalBytes: max_total_bytes,
+        maxChunks: max_chunks,
+      });
+      const harnessContext = await buildHarnessRuntimeContext(workspaceRoot, root);
+      await appendHarnessEventSafe(workspaceRoot, {
+        type: "context/bundle",
+        project_roots: [root],
+        ...(harnessContext.task?.task_id ? { task_id: harnessContext.task.task_id } : {}),
+        ...(harnessContext.goal?.goal_id ? { goal_id: harnessContext.goal.goal_id } : {}),
+        data: {
+          query: query.trim(),
+          selected_chunks: bundle.chunks.length,
+          selected_files: bundle.files.map((file) => file.relative_path),
+          total_bytes: bundle.total_bytes,
+        },
+      });
+      return toolResult("project_context", {
+        root,
+        mode: effectiveMode,
+        ...bundle,
+        harness_context: harnessContext,
+        count: sources.length,
+      });
     }
   );
 
@@ -157,6 +222,9 @@ export function registerContextTools(server: McpServer, workspaceRoot: string): 
         audit_log: getAuditPath(),
         pid: process.pid,
         node: process.version,
+        memory: process.memoryUsage(),
+        browser_runtime: getBrowserRuntimeStatus(),
+        process_runtime: getManagedProcessRuntimeStatus(),
         quickstart: MCP_QUICKSTART,
         rewind: getCheckpointConfig(),
         upstream_mcp: {
@@ -165,6 +233,8 @@ export function registerContextTools(server: McpServer, workspaceRoot: string): 
         },
         admin_ui: `http://127.0.0.1:${process.env.ADMIN_PORT || "3001"}/ui`,
         tool_profile: process.env.CHATGPT_TOOL_PROFILE || "slim",
+        runtime_manifest: getRuntimeManifest(),
+        event_log: await getHarnessEventLogHealth(workspaceRoot),
       });
     }
   );
@@ -191,7 +261,7 @@ export function registerContextTools(server: McpServer, workspaceRoot: string): 
     {
       title: "Load Path Rules",
       description:
-        "Load .claude/rules/*.md scoped to a file path (Claude Code path-specific rules). Call after read_text_file when editing unfamiliar areas.",
+        "Load the AGENTS.md/CLAUDE.md chain from project root to a file plus matching .claude/rules globs. Deeper directory instructions have higher precedence.",
       inputSchema: {
         path: z.string().describe("File path to match against rule paths: frontmatter"),
       },

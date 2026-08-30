@@ -15,21 +15,29 @@ function ok(m) { console.log(`OK  ${m}`); passed++; }
 function fail(m, e) { console.error(`FAIL ${m}: ${e}`); failed++; }
 
 try {
-  if (SLIM_CHATGPT_TOOLS.size < 18) throw new Error(`slim set too small: ${SLIM_CHATGPT_TOOLS.size}`);
+  if (SLIM_CHATGPT_TOOLS.size !== 27) throw new Error(`expected 27 slim tools, got ${SLIM_CHATGPT_TOOLS.size}`);
   ok(`slim profile has ${SLIM_CHATGPT_TOOLS.size} tools`);
 
   for (const t of [
-    "apply_patch", "glob", "remember", "load_path_rules",
+    "read_text_file", "apply_patch", "glob", "grep", "remember",
     "read_file_base64", "file_info", "write_file_base64", "save_chatgpt_file",
-    "create_directory", "copy_file", "move_file", "delete_file",
-    "shell_reset", "process_status", "process_output", "stop_process", "clear_processes",
+    "run_command", "shell_status", "start_process", "process_status", "process_output", "stop_process",
+    "git_status", "git_diff", "project_context", "list_skills", "load_skill",
+    "goal", "task_state", "visual_review", "rewind",
   ]) {
     if (!shouldExposeTool(t, "slim")) throw new Error(`${t} missing from slim`);
   }
   ok("core tools exposed in slim");
 
-  if (shouldExposeTool("mcp_call", "slim")) throw new Error("mcp_call should be hidden in slim");
-  if (shouldExposeTool("delete_directory", "slim")) throw new Error("delete_directory hidden");
+  if (shouldExposeTool("ponytail_turn", "slim")) throw new Error("unavailable ponytail_turn should be hidden in slim");
+
+  for (const hidden of [
+    "edit_file", "multi_edit", "create_directory", "copy_file", "move_file", "delete_file", "delete_directory",
+    "shell_reset", "clear_processes", "git_add", "git_commit", "git_restore", "load_path_rules", "node_repl",
+    "mcp_servers", "mcp_call", "browser_open", "open_image", "render_svg",
+  ]) {
+    if (shouldExposeTool(hidden, "slim")) throw new Error(`${hidden} should be hidden in slim`);
+  }
   ok("heavy tools hidden in slim");
 
   if (!shouldExposeTool("mcp_call", "full")) throw new Error("full should expose all");
