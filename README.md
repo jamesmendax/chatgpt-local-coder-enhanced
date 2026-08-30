@@ -2,7 +2,7 @@
 
 # ChatGPT Local Coder
 
-**Turn ChatGPT web into a local coding agent — files, shell, git, patches, 40+ MCP tools.**
+**Turn ChatGPT web into a local coding agent — a 27-tool web profile with Goal Mode, compact task state, shell evidence, git, and patches.**
 
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-6366f1?style=flat-square)](https://modelcontextprotocol.io)
 [![ChatGPT](https://img.shields.io/badge/ChatGPT-Developer%20Mode-10a37f?style=flat-square)](https://platform.openai.com/docs/guides/developer-mode)
@@ -23,7 +23,7 @@ No desktop app. No vendor lock-in. Run one Node process on your PC, expose it th
 ```
 ┌─────────────────┐     HTTPS      ┌──────────────────┐     localhost     ┌─────────────────────┐
 │   ChatGPT Web   │ ─────────────► │  Tunnel (opt.)   │ ────────────────► │  chatgpt-local-coder │
-│ Developer Mode  │                │ OpenAI / CF      │      :3000/mcp    │  40+ MCP tools       │
+│ Developer Mode  │                │ OpenAI / CF      │      :3000/mcp    │  27-tool web profile │
 └─────────────────┘                └──────────────────┘                   └──────────┬──────────┘
                                                                                     │
                                          ┌──────────────────────────────────────────┼──────────┐
@@ -36,12 +36,13 @@ No desktop app. No vendor lock-in. Run one Node process on your PC, expose it th
 
 | | ChatGPT alone | **+ ChatGPT Local Coder** |
 |---|---|---|
-| Edit your repo | ❌ | ✅ `apply_patch`, `edit_file`, `multi_edit` |
-| Run tests / builds | ❌ | ✅ `run_command`, `start_process` |
-| Git workflow | ❌ | ✅ `git_status`, `git_commit`, `git_push`, … |
+| Edit your repo | ❌ | ✅ `apply_patch`, `write_file` |
+| Run tests / builds | ❌ | ✅ compact `run_command` results + full log artifacts |
+| Git workflow | ❌ | ✅ `git_status`, `git_diff`, or deterministic shell commands |
 | Explore codebase | Limited | ✅ `glob`, `grep`, `list_directory` |
 | Full disk access | ❌ | ✅ Any path on your machine |
 | Session recovery | — | ✅ Auto-recover after server restart |
+| Long-task handoff | — | ✅ `task_state` checkpoints with failures, checks, files, and next actions |
 
 Built for **[ChatGPT Developer Mode](https://platform.openai.com/docs/guides/developer-mode)** with optimized tool annotations (fewer permission popups) and **[OpenAI Secure MCP Tunnel](https://platform.openai.com/docs/guides/secure-mcp-tunnel)** support (stable URL, no connector re-wiring every restart).
 
@@ -99,7 +100,7 @@ See [Tunnel options](#-tunnel-options) below. You need a **public HTTPS** URL po
 | Field | Value |
 |-------|-------|
 | **Name** | `Local Coder` |
-| **Description** | `Local coding agent. First call agent_status + project_context. Use glob/grep to explore, apply_patch to edit, run_command for shell.` |
+| **Description** | `Local coding agent. Use glob/grep/read, apply_patch/write, run_command for verification, and task_state for multi-phase work.` |
 | **URL** | `https://<your-tunnel>/mcp/<MCP_TOKEN>` — see below |
 | **Authentication** | None (the token is already in the URL) |
 
@@ -198,14 +199,19 @@ Free sessions expire after **60 minutes** and the URL changes each time, so you 
 
 ## 🧰 Tools
 
-**40+ tools** with structured JSON responses `{ ok, tool, summary, data }`.
+The default `slim` profile exposes **27 preferred tools** to ChatGPT web. `full` keeps the complete local catalog for other MCP clients and compatibility. Both profiles return structured results as `{ ok, tool, summary, data }`.
 
-### Onboarding *(call these first)*
+The slim profile deliberately exposes one preferred path per operation. File moves, deletes, Git mutations, and other deterministic mechanics use `run_command`; legacy convenience wrappers stay available in `full`. With Goal Mode enabled, `tools/list` remains about 22 KB while keeping one preferred path per operation.
+
+### Context and task state
 
 | Tool | Description |
 |------|-------------|
-| `agent_status` | Permissions, workspace roots, audit log |
-| `project_context` | Reads AGENTS.md, README, CLAUDE.md, configs |
+| `goal` | Persistent Goal Mode: objective, explicit success criteria, constraints, status, and completion gating |
+| `project_context` | Compact project map or task-relevant AGENTS/CLAUDE/README sections |
+| `task_state` | Create/resume/checkpoint/complete a compact long-task handoff |
+| `agent_status` | Optional diagnostics: permissions, runtime state, and full cheat sheet |
+| `list_skills` / `load_skill` | Discover and load project workflows only when relevant |
 
 ### Filesystem
 
@@ -213,38 +219,35 @@ Free sessions expire after **60 minutes** and the URL changes each time, so you 
 |------|-------------|
 | `read_text_file` | Read source files (offset + limit) |
 | `write_file` | Create or overwrite files |
-| `edit_file` | Find-and-replace edits |
-| `multi_edit` | Multiple edits in one file |
-| `replace_regex` | Regex replace in file |
 | `apply_patch` | Unified / Codex-style patches |
 | `glob` | Find files by pattern (sorted by mtime) |
 | `grep` | Search content (content / files / count modes) |
 | `list_directory` | List folder contents |
-| `directory_tree` | Recursive tree as JSON |
-| `create_directory` | Create folders |
-| `delete_file` / `delete_directory` | Remove files or dirs |
-| `copy_file` / `move_file` | Copy or rename |
 | `read_file_base64` / `write_file_base64` | Binary file support |
+| `save_chatgpt_file` | Stream a conversation attachment directly to disk |
+| `file_info` | Inspect file type, size, timestamps, signature, and optional SHA256 |
+| `open_image` | Return a local PNG/JPEG/WebP/GIF as real MCP image content |
 
 ### Shell
 
 | Tool | Description |
 |------|-------------|
-| `run_command` | Run shell commands (`npm test`, builds, …) |
-| `shell_status` / `shell_reset` | Persistent shell session |
-| `start_process` | Long-running / background commands |
+| `run_command` | Compact test/build diagnostics plus a retained full-output log |
+| `shell_status` | Persistent shell cwd and recent commands |
+| `start_process` | Long-running/background command with retained full-output log |
 | `process_status` / `process_output` / `stop_process` | Manage background jobs |
 
 ### Git
 
 | Tool | Description |
 |------|-------------|
-| `git_status` / `git_diff` / `git_log` | Inspect repo |
-| `git_add` / `git_commit` | Stage and commit |
-| `git_branch` / `git_checkout` | Branch list, create, switch (local only) |
-| `git_restore` | Restore tracked files to last commit |
-| `git_push` / `git_pull` | Sync with configured remote |
-| `git_stash` / `git_reset` | Stash and reset |
+| `git_status` / `git_diff` | Structured inspection in slim |
+| `run_command` | Commit, restore, branch, pull, push, stash, and other Git mutations |
+| `rewind` | Restore automatic pre-edit checkpoints without touching conversation history |
+
+### Full profile
+
+`CHATGPT_TOOL_PROFILE=full` restores convenience wrappers such as `edit_file`, `multi_edit`, directory/file mutation tools, the full `git_*` family, browser tools, detailed task tools, Node REPL, and upstream-MCP diagnostics. Enabled upstream MCP tools are still exposed directly in either profile.
 
 ### Claude Code ↔ MCP mapping
 
@@ -252,10 +255,10 @@ Free sessions expire after **60 minutes** and the URL changes each time, so you 
 |-------------|-------------|
 | `Read` | `read_text_file` |
 | `Write` | `write_file` |
-| `Edit` / `MultiEdit` | `edit_file` / `multi_edit` |
+| `Edit` / `MultiEdit` | `apply_patch` |
 | `Glob` / `Grep` / `LS` | `glob` / `grep` / `list_directory` |
 | `Bash` | `run_command` |
-| — | `apply_patch`, `git_*`, `project_context` |
+| — | `apply_patch`, `task_state`, `project_context`, `open_image` |
 
 ## ⚙️ Configuration
 
@@ -267,6 +270,7 @@ HOST=127.0.0.1
 MCP_TOKEN=                      # generate one — see below
 WORKSPACE_PATH=C:\Users\You\projects\my-app     # macOS: /Users/you/projects/my-app
 CHATGPT_AUTO_APPROVE=true
+CHATGPT_TOOL_PROFILE=slim
 SHELL_TIMEOUT=120
 MCP_SESSION_RECOVERY=true
 ADMIN_PORT=3011
@@ -284,13 +288,54 @@ OPENAI_TUNNEL_API_KEY=
 | `ADMIN_PORT` | `3001` | [Admin UI](#-admin-ui) port (localhost-only, always on). Change it if something else uses 3001 — Docker Desktop often does |
 | `ADMIN_TOKEN` | *(empty)* | Bearer token for the Admin UI. Empty = loopback check only |
 | `CHATGPT_AUTO_APPROVE` | `true` | Tool annotations to reduce ChatGPT popups |
+| `CHATGPT_TOOL_PROFILE` | `slim` | `slim` exposes 26 preferred web tools; `full` exposes the complete local catalog |
 | `MCP_SESSION_RECOVERY` | `true` | Auto-recover stale sessions after restart |
 | `SHELL_TIMEOUT` | `120` | Max seconds for `run_command` |
+| `ACTIVE_TASK_TTL_MS` | `86400000` | Stop automatic task observation after an inactive task pointer is older than this; task files remain resumable |
+| `COMMAND_LOG_MAX_FILES` | `120` | Retained full command logs per project |
+| `READ_TEXT_MAX_FILE_BYTES` | `33554432` | Reject whole-file text reads above 32 MB; use `grep` or targeted shell extraction |
+| `READ_TEXT_MAX_CHARS` / `READ_TEXT_MAX_LINES` | `50000` / `1000` | Bound one `read_text_file` result and return `next_offset` |
+| `LIST_DIRECTORY_MAX_ENTRIES` | `500` | Bound one directory listing and report omitted entries |
 | `FULL_DISK_ACCESS` | `true` | Access any path on the machine |
 
 > Variables already set in your shell **win over `.env`** (`dotenv` does not override). If a change to `.env` seems ignored, check `env | grep WORKSPACE_PATH` first.
 
 > **Full machine access** is enabled by default. `WORKSPACE_PATH` only sets the default cwd — absolute paths like `D:\Projects\…` work everywhere.
+
+## 👁️ Universal visual review
+
+The slim profile exposes one high-level `visual_review` tool instead of several format-specific screenshot primitives. It can review:
+
+- PNG, JPEG, WebP, and GIF images
+- SVG
+- local HTML, localhost apps, and HTTP/HTTPS pages
+- PDF pages
+- PowerPoint `.pptx` slides
+- Word `.docx` pages
+
+It returns real MCP image content plus structured evidence: overview previews, optional selector/region focus crops, DOM geometry, console/page/request errors, clipping/overflow signals, page contact sheets, and before-after pixel comparison. Each review receives a `review_id` and a source signature. When an active `task_state` requires visual QA, changing the source after review invalidates delivery until `visual_review` is run again.
+
+For Office safety, PPTX/DOCX rendering refuses to attach when the corresponding Office application is already running unless `allow_office_running=true` is explicitly supplied. The default avoids interfering with documents the user already has open.
+
+Typical loop:
+
+```text
+create or edit the real artifact
+→ visual_review(target, focus=[...])
+→ inspect the returned full render/page ImageContent with the model's own vision
+→ visual_review(action=assess, review_id=<current>, verdict=fail|pass, inspected_full_render=true, further_improvement_worthwhile=<true|false>)
+→ if fail: make a focused source correction
+→ if pass but further improvement is worthwhile: record improvement_opportunities, revise the source, and continue
+→ visual_review(target, compare_to=<prior review_id>) to obtain fresh pixels plus before/after evidence
+→ inspect both versions and assess comparison=improved|unchanged|regressed; record strengths when the new version improves
+→ judge each current version on its own merits; do not treat "improved versus before" as proof that it is finished
+→ repeat while another meaningful visual improvement remains worthwhile and the universal 5-iteration budget is not exhausted
+→ for PPTX/PDF/DOCX, continue through `recommended_next_pages` until every page in the current source version has a passing visual assessment
+→ stop early when no worthwhile improvement remains; otherwise iteration 5 is the hard autonomous refinement cap
+→ complete the task only while the final render is current, fully covered, and passes visual assessment; the 5-iteration cap never overrides those hard gates
+```
+
+`machine_blocking_issues` and runtime diagnostics are deliberately auxiliary. A clean renderer does **not** mean the artifact looks correct. Visual Review keeps acceptability separate from improvement potential: a version may be technically and semantically passable while still being worth another revision. The iteration policy is universal across images, SVG, web/UI, PDF, PPTX, and DOCX: `model_visual_iteration` reports the current iteration, the maximum of 5, whether the limit has been reached, and whether continuation is still required. Before iteration 5, `task_state` will not enter `DELIVERABLE_READY` while the model still identifies worthwhile visual improvement. At iteration 5 the autonomous improvement loop stops, but delivery still requires a passing semantic visual assessment, full required page coverage, a current source review, and no machine blocking issue. Multi-page artifacts are reviewed in consecutive batches; only pages whose full page images were actually returned to the model count toward coverage.
 
 ## 🖥️ Admin UI
 
@@ -325,23 +370,31 @@ src/
 ├── lib/
 │   ├── mcp-session-manager.ts   # Session recovery, TTL
 │   ├── patch.ts             # apply_patch engine
-│   └── persistent-shell.ts  # Stateful shell
+│   ├── persistent-shell.ts  # Stateful shell + full command logs
+│   ├── durable-tasks.ts     # Compact task checkpoints + observations
+│   └── context-bundle.ts    # Task-relevant context selection
 └── tools/
-    ├── filesystem.ts        # 18 tools
-    ├── shell.ts             # 8 tools
-    ├── git.ts               # 11 tools
-    └── context.ts           # agent_status, project_context
+    ├── filesystem.ts        # Files, search, patch, binary transfer
+    ├── shell.ts             # Short and background commands
+    ├── git.ts               # Git wrappers retained for full profile
+    ├── tasks.ts             # task_state + compatibility task tools
+    └── context.ts           # project context, skills, diagnostics
 ```
 
 - **Transport:** MCP Streamable HTTP — `/mcp/<MCP_TOKEN>` and `/<MCP_TOKEN>` (or `/mcp` and `/` when `MCP_TOKEN` is empty)
 - **Session:** Stateful with auto-recovery when ChatGPT holds a stale session ID
 - **Output:** Structured JSON from every tool
+- **Web discovery:** 27 slim tools, about 22 KB in the verified local schema
 
 ## 🧪 Development
 
 ```powershell
 npm run build          # compile TypeScript
 npm test               # patch + tool unit tests
+npm run test:all       # unit + temporary-server integration suite
+npm run eval:selftest  # prove every benchmark rejects broken fixtures and accepts references
+npm run eval:prepare -- --task code-fix
+npm run eval:grade -- --run <run-directory>
 npm run dev            # watch mode (tsx)
 node scripts/test-mcp-session.mjs   # integration test (server must be running)
 ```

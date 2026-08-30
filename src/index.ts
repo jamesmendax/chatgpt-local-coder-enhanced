@@ -26,14 +26,38 @@ import {
   type InstructionContext,
 } from "./lib/instruction-context.js";
 import { getChatGptToolProfile } from "./lib/tool-profile.js";
+import { getRuntimeManifest, getRuntimeManifestSummary } from "./lib/runtime-manifest.js";
 
-const PORT = parseInt(process.env.PORT || "3000", 10);
+function intEnv(name: string, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(process.env[name] || "", 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(parsed, min), max);
+}
+
+const PORT = intEnv("PORT", 3000, 1, 65535);
 const HOST = process.env.HOST || "127.0.0.1";
 const MCP_TOKEN = (process.env.MCP_TOKEN || "").trim();
-const ADMIN_PORT = parseInt(process.env.ADMIN_PORT || "3001", 10);
-const SHELL_TIMEOUT = parseInt(process.env.SHELL_TIMEOUT || "120", 10);
+const ADMIN_PORT = intEnv("ADMIN_PORT", 3001, 1, 65535);
+const SHELL_TIMEOUT = intEnv("SHELL_TIMEOUT", 120, 1, 3600);
+const MCP_JSON_LIMIT = process.env.MCP_JSON_LIMIT?.trim() || "16mb";
 const SESSION_RECOVERY =
   (process.env.MCP_SESSION_RECOVERY || "true").toLowerCase() !== "false";
+
+const configuredCorsOrigins = (process.env.MCP_CORS_ORIGINS || "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
+const MCP_CORS_ORIGINS = new Set(
+  configuredCorsOrigins.length
+    ? configuredCorsOrigins
+    : ["https://chatgpt.com", "https://chat.openai.com"]
+);
+const MCP_CORS_ALLOW_ALL = MCP_CORS_ORIGINS.has("*");
+
+function redactMcpPath(value: string): string {
+  if (!MCP_TOKEN) return value;
+  return value.split(MCP_TOKEN).join("<redacted>");
+}
 
 function splitWorkspaceEnv(value: string | undefined): string[] {
   if (!value) return [];
@@ -84,6 +108,10 @@ console.log(
   `[MCP] MCP instructions: ${Math.round(instructionContext.instructionBytes / 1024)}KB (agent prompt + env + git + memory)`
 );
 console.log(`[MCP] Tool profile: ${getChatGptToolProfile()} (CHATGPT_TOOL_PROFILE)`);
+const startupManifest = getRuntimeManifest();
+console.log(
+  `[MCP] Runtime build: ${startupManifest.build_id}; local tools: ${startupManifest.tool_count}; manifest: ${startupManifest.tool_manifest_hash.slice(0, 12)}`
+);
 
 const sessionManager = createSessionManager({
   workspaceRoot,
@@ -94,8 +122,26 @@ const sessionManager = createSessionManager({
 });
 
 const app = express();
-app.use(cors());
-app.use(express.json({ limit: "50mb" }));
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || MCP_CORS_ALLOW_ALL || MCP_CORS_ORIGINS.has(origin)) {
+      callback(null, true);
+      return;
+    }
+    callback(null, false);
+  },
+  methods: ["GET", "POST", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Accept",
+    "Mcp-Session-Id",
+    "Mcp-Protocol-Version",
+    "Last-Event-ID",
+  ],
+  exposedHeaders: ["Mcp-Session-Id", "Mcp-Protocol-Version"],
+  maxAge: 600,
+}));
+app.use(express.json({ limit: MCP_JSON_LIMIT }));
 // ChatGPT co the goi "/" hoac "/mcp" — ho tro ca hai.
 // Neu dat MCP_TOKEN, endpoint doi thanh "/<token>" + "/mcp/<token>" va cac path
 // khong co token se tra 401 (chong scan tunnel URL / trang web goi vao localhost).
@@ -128,7 +174,7 @@ app.use((req, res, next) => {
             : `HTTP ${res.statusCode}`);
       logMcpHttpEvent({
         method: req.method,
-        path: req.path,
+        path: redactMcpPath(req.path),
         httpStatus: res.statusCode,
         durationMs: duration,
         sessionId,
@@ -158,14 +204,11 @@ app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
     name: "codex-mcp-server",
-    workspace: workspaceRoot,
-    defaultCwd: getDefaultCwd(),
-    fullMachineAccess: true,
-    fullDiskAccess: getFullDiskAccess(),
-    activeSessions: sessionManager.count(),
+    version: "2.0.0",
+    auth: MCP_TOKEN ? "path-token" : "none",
+    toolProfile: getChatGptToolProfile(),
     sessionRecovery: SESSION_RECOVERY,
-    mcpEndpoints: MCP_PATHS,
-    instructions: summarizeInstructionContext(instructionContext),
+    runtime: getRuntimeManifestSummary(),
   });
 });
 
@@ -305,8 +348,8 @@ const server = app.listen(PORT, HOST, () => {
   console.log("  Codex MCP Server");
   console.log("========================================");
   console.log(`  Local:     http://${HOST}:${PORT}`);
-  console.log(`  MCP:       http://${HOST}:${PORT}${MCP_PATHS[0]}`);
-  console.log(`  MCP alt:   http://${HOST}:${PORT}${MCP_PATHS[1]}`);
+  console.log(`  MCP:       http://${HOST}:${PORT}${redactMcpPath(MCP_PATHS[0])}`);
+  console.log(`  MCP alt:   http://${HOST}:${PORT}${redactMcpPath(MCP_PATHS[1])}`);
   console.log(`  Health:    http://${HOST}:${PORT}/health`);
   console.log(`  Admin UI:  http://127.0.0.1:${ADMIN_PORT}/ui`);
   console.log(`  Default cwd: ${workspaceRoot}`);
@@ -314,6 +357,8 @@ const server = app.listen(PORT, HOST, () => {
   console.log(`  Session recovery: ${SESSION_RECOVERY ? "ON" : "OFF"}`);
   console.log(`  Auth:      ${MCP_TOKEN ? "ON (MCP_TOKEN in URL path)" : "OFF — dat MCP_TOKEN trong .env!"}`);
   console.log(`  PID:       ${process.pid}`);
+  console.log(`  Build:     ${startupManifest.build_id}`);
+  console.log(`  Tools:     ${startupManifest.tool_count} (${startupManifest.tool_manifest_hash.slice(0, 12)})`);
   console.log("========================================");
   console.log("  Dang chay... (Ctrl+C de dung)");
   console.log("========================================");
@@ -332,13 +377,29 @@ server.on("error", (err: NodeJS.ErrnoException) => {
   process.exit(1);
 });
 
-process.on("SIGINT", () => {
-  console.log("\n[DUNG] Server dang tat...");
+let shuttingDown = false;
+
+function shutdownServer(signal: string): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n[DUNG] Server dang tat... (${signal})`);
   sessionManager.stopCleanup();
   void upstreamManager.shutdown();
   adminServer.close();
-  server.close(() => process.exit(0));
-});
+  const forceTimer = setTimeout(() => {
+    console.warn("[DUNG] Active request did not drain; forcing HTTP connections closed.");
+    server.closeAllConnections?.();
+    process.exit(0);
+  }, 8_000);
+  forceTimer.unref?.();
+  server.close(() => {
+    clearTimeout(forceTimer);
+    process.exit(0);
+  });
+}
+
+process.on("SIGINT", () => shutdownServer("SIGINT"));
+process.on("SIGTERM", () => shutdownServer("SIGTERM"));
 
 // Tranh process tu tat khi stdin dong (Windows)
 if (process.stdin.isTTY) {

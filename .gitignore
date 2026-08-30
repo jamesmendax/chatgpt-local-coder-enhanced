@@ -12,6 +12,7 @@ profiles/*
 .mcp-oauth/
 .codex-remote-attachments/
 .env
+.secrets/
 terminals/
 agent-tools/
 mcps/
@@ -19,3 +20,8 @@ log_console.txt
 *.log
 .DS_Store
 Thumbs.db
+
+# local-only: contains the business tunnel id
+openai-tunnel-business.ps1
+# local-only binary tutorial
+chatgpt-local-coder-部署教程.docx

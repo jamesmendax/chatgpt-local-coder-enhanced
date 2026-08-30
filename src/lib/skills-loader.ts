@@ -1,12 +1,17 @@
 import fs from "fs/promises";
 import path from "path";
+import { fileURLToPath } from "url";
 import { resolveComputerUseSkillPath } from "./plugin-config.js";
 
 export interface SkillSummary {
   name: string;
   description: string;
   path: string;
-  source?: "project" | "plugin";
+  source?: "project" | "builtin" | "plugin";
+}
+
+function serverRoot(): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 }
 
 function parseFrontmatter(content: string): { name?: string; description?: string } {
@@ -19,10 +24,9 @@ function parseFrontmatter(content: string): { name?: string; description?: strin
 }
 
 export async function loadProjectSkills(workspaceRoot: string): Promise<SkillSummary[]> {
-  const skillsDir = path.join(workspaceRoot, ".claude", "skills");
   const out: SkillSummary[] = [];
 
-  async function walk(dir: string, depth: number): Promise<void> {
+  async function walk(dir: string, depth: number, source: "project" | "builtin"): Promise<void> {
     if (depth > 3) return;
     let entries;
     try {
@@ -39,25 +43,33 @@ export async function loadProjectSkills(workspaceRoot: string): Promise<SkillSum
           const fm = parseFrontmatter(content);
           const name = fm.name || entry.name;
           const description = fm.description || content.split("\n").find((l) => l.trim() && !l.startsWith("#"))?.trim() || name;
-          out.push({ name, description: description.slice(0, 200), path: skillFile });
+          if (!out.some((skill) => skill.name === name)) {
+            out.push({ name, description: description.slice(0, 200), path: skillFile, source });
+          }
         } catch {
-          await walk(full, depth + 1);
+          await walk(full, depth + 1, source);
         }
       }
     }
   }
 
-  await walk(skillsDir, 0);
+  // Project skills win by name. Built-ins provide a stable Codex-like baseline
+  // for every WORKSPACE_PATH without copying skill files into each project.
+  await walk(path.join(workspaceRoot, ".claude", "skills"), 0, "project");
+  await walk(path.join(serverRoot(), "skills"), 0, "builtin");
   const computerUseSkill = await resolveComputerUseSkillPath();
   if (computerUseSkill) {
     const content = await fs.readFile(computerUseSkill, "utf-8");
     const frontmatter = parseFrontmatter(content);
-    out.push({
-      name: frontmatter.name || "computer-use",
-      description: (frontmatter.description || "Control Windows apps from ChatGPT").slice(0, 200),
-      path: computerUseSkill,
-      source: "plugin",
-    });
+    const name = frontmatter.name || "computer-use";
+    if (!out.some((skill) => skill.name === name)) {
+      out.push({
+        name,
+        description: (frontmatter.description || "Control Windows apps from ChatGPT").slice(0, 200),
+        path: computerUseSkill,
+        source: "plugin",
+      });
+    }
   }
   return out;
 }

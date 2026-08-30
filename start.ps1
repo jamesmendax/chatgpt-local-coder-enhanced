@@ -3,7 +3,8 @@ param(
     [string]$Workspace = $env:WORKSPACE_PATH,
     [int]$Port = 3000,
     [switch]$Force,
-    [switch]$OpenUI
+    [switch]$OpenUI,
+    [switch]$SkipBuild
 )
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -93,14 +94,22 @@ if ($existingPid) {
     }
 }
 
-if (-not (Test-Path "dist/index.js")) {
-    Write-Host "Building..." -ForegroundColor Yellow
-    npm run build
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Build that bai!" -ForegroundColor Red
-        Read-Host "Nhan Enter de dong"
+if ($SkipBuild) {
+    if (-not (Test-Path (Join-Path $ScriptDir "dist\index.js"))) {
+        Write-Host "dist\index.js not found. Run .\start.ps1 without -SkipBuild once to build the server." -ForegroundColor Red
         exit 1
     }
+    Write-Host "Using existing dist build; skipped npm run build." -ForegroundColor Green
+} elseif (-not (Test-Path (Join-Path $ScriptDir "dist\index.js"))) {
+    Write-Host "Building current source before startup..." -ForegroundColor Yellow
+    npm run build
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Build failed!" -ForegroundColor Red
+        Read-Host "Press Enter to close"
+        exit 1
+    }
+} else {
+    Write-Host "Using existing dist build." -ForegroundColor Green
 }
 
 Write-Host "Khoi dong server (log hien ben duoi)..." -ForegroundColor Green

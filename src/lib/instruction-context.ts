@@ -14,6 +14,7 @@ import { appendAutoMemory, formatAutoMemoryForInstructions, loadAutoMemory } fro
 import { formatSkillsForInstructions, loadProjectSkills } from "./skills-loader.js";
 import { getChatGptToolProfile } from "./tool-profile.js";
 import { buildServerInstructions } from "./quickstart.js";
+import { formatActiveGoalForInstructions } from "./goals.js";
 
 export interface InstructionContextOptions {
   workspaceRoot: string;
@@ -32,18 +33,24 @@ export interface InstructionContext {
 export async function buildInstructionContext(
   opts: InstructionContextOptions
 ): Promise<InstructionContext> {
-  const [projectMemory, git, skills, autoMemory] = await Promise.all([
-    loadProjectMemory(opts.workspaceRoot, { workspaceRoots: opts.workspaceRoots }),
-    collectGitSnapshot(opts.workspaceRoot),
-    loadProjectSkills(opts.workspaceRoot),
-    loadAutoMemory(opts.workspaceRoot),
-  ]);
-
   const profile = getChatGptToolProfile();
+  const isWebSlim = profile === "slim";
+  const [projectMemory, git, skills, autoMemory, activeGoal] = await Promise.all([
+    loadProjectMemory(opts.workspaceRoot, {
+      workspaceRoots: opts.workspaceRoots,
+      maxBytes: isWebSlim ? 8_000 : undefined,
+      maxLines: isWebSlim ? 100 : undefined,
+    }),
+    collectGitSnapshot(opts.workspaceRoot),
+    isWebSlim ? Promise.resolve([]) : loadProjectSkills(opts.workspaceRoot),
+    loadAutoMemory(opts.workspaceRoot, isWebSlim ? { maxBytes: 4_000, maxLines: 40 } : undefined),
+    formatActiveGoalForInstructions(opts.workspaceRoot),
+  ]);
 
   const blocks = [
     CODEX_AGENT_PROMPT,
-    `Tool profile: **${profile}** (${profile === "slim" ? "core tools only — optimal for ChatGPT web" : "all tools exposed"}).`,
+    `Tool profile: **${profile}**.`,
+    activeGoal,
     formatEnvironmentForInstructions({
       workspaceRoot: opts.workspaceRoot,
       workspaceRoots: opts.workspaceRoots,
@@ -53,8 +60,8 @@ export async function buildInstructionContext(
     }),
     formatGitSnapshotForInstructions(git),
     formatAutoMemoryForInstructions(autoMemory),
-    formatProjectMemoryForInstructions(projectMemory),
-    formatSkillsForInstructions(skills),
+    projectMemory.sections.length ? formatProjectMemoryForInstructions(projectMemory) : "",
+    isWebSlim ? "" : formatSkillsForInstructions(skills),
   ].filter(Boolean);
 
   const projectMemoryBlock = blocks.join("\n\n");
