@@ -122,9 +122,13 @@ try {
   process.env.CODEX_HOME = computerHome;
   try {
     const { loadProjectSkill } = await import("../dist/lib/skills-loader.js");
-    const loaded = await loadProjectSkill(computerWorkspace, "computer-use", 100_000);
-    assert.equal(loaded.skill.source, "computer-use");
-    assert.deepEqual((loaded.references ?? []).map((entry) => path.basename(entry.path)), ["guidance.md", "api.md", "confirmations.md"]);
+    if (process.platform === "win32") {
+      const loaded = await loadProjectSkill(computerWorkspace, "computer-use", 100_000);
+      assert.equal(loaded.skill.source, "computer-use");
+      assert.deepEqual((loaded.references ?? []).map((entry) => path.basename(entry.path)), ["guidance.md", "api.md", "confirmations.md"]);
+    } else {
+      await assert.rejects(() => loadProjectSkill(computerWorkspace, "computer-use", 100_000), /Unknown Skill/);
+    }
   } finally {
     if (previousConfig === undefined) delete process.env.CHATGPT_PLUGINS_CONFIG;
     else process.env.CHATGPT_PLUGINS_CONFIG = previousConfig;
