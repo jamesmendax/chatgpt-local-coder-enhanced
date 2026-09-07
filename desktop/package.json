@@ -1,0 +1,24 @@
+{
+  "name": "chatgpt-web-harness-desktop",
+  "version": "0.1.1",
+  "description": "ChatGPT Web Harness 桌面启动器：初始化、启停 MCP 与 Secure MCP Tunnel，并集中显示实时活动日志",
+  "private": true,
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "stage": "node scripts/stage-harness.mjs",
+    "start:build": "npm run stage -- --build && electron .",
+    "smoke": "electron scripts/smoke.js",
+    "test": "npm run smoke && npm run test:migration && npm run test:node-shim && node scripts/test-zip-safety.mjs && node scripts/test-payload-manifest.mjs",
+    "test:migration": "electron scripts/test-migration.js",
+    "test:node-shim": "electron scripts/test-node-shim.js",
+    "acceptance": "node scripts/acceptance-portable.mjs",
+    "dist": "node scripts/stage-harness.mjs && node scripts/patch-portable-template.mjs && electron-builder --win --config electron-builder.yml",
+    "dist:portable": "node scripts/stage-harness.mjs && node scripts/patch-portable-template.mjs && electron-builder --win portable --config electron-builder.yml",
+    "dist:zip": "node scripts/stage-harness.mjs && electron-builder --win zip --config electron-builder.yml"
+  },
+  "devDependencies": {
+    "electron": "40.10.2",
+    "electron-builder": "^26.0.12"
+  }
+}

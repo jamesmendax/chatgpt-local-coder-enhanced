@@ -2,6 +2,30 @@
 
 All notable user-facing changes to ChatGPT Local Coder Enhanced are recorded here.
 
+## 1.4.0 - 2026-09-06
+
+### Added
+
+- Windows Electron desktop client with setup, portable, and x64 ZIP packaging for the local MCP server and Secure MCP Tunnel.
+- Safe Skill/plugin lifecycle: v2 registry normalization, deterministic source priority and aliases, install/uninstall, enable/disable, Admin API routes, and MCP tools.
+- Desktop Skill installation from a local directory or ZIP with bounded archive validation; package scripts are never executed.
+
+### Changed
+
+- The default `slim` profile now exposes 30 tools, including the three Skill lifecycle tools; the full catalog contains 70 statically registered tools.
+- Desktop staging uses sanitized public profiles, an explicit payload manifest, and an embedded Electron Node shim so a target Windows computer does not need system Node.
+- The release package contains no app-level preinstalled Skills. Project, installed, and externally registered Skills are discovered only from the selected workspace or runtime registry.
+
+### Fixed
+
+- Portable launches no longer share a fixed temporary unpack directory. Each launch uses an isolated unpack location and refuses to start when the staged harness is incomplete.
+- Skill registry writes are atomic and preserve the previous registry on publication failure; disabled, missing, or invalid registrations stay out of the active Skill surface.
+
+### Compatibility
+
+- Existing native tools and input schemas remain available. Because three new lifecycle tools were added to `slim`, existing ChatGPT custom MCP apps must be rescanned/re-published to receive them.
+- Skills are data-only instructions. Tool-providing extensions continue to use the existing upstream MCP configuration and admission controls.
+
 ## 1.3.0 - 2026-08-30
 
 ### Added

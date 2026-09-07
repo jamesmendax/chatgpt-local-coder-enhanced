@@ -22,7 +22,7 @@
 
 This repository is the enhanced fork maintained by [@jamesmendax](https://github.com/jamesmendax) at [`jamesmendax/chatgpt-local-coder-enhanced`](https://github.com/jamesmendax/chatgpt-local-coder-enhanced). It is based on [`hoangcoderr/chatgpt-local-coder`](https://github.com/hoangcoderr/chatgpt-local-coder) and remains MIT licensed.
 
-The enhanced branch adds and hardens direct ChatGPT attachment saving, ChatGPT web tool profiles, MCP session recovery, checkpoint/rewind support, verified binary-file transfer, file inspection, Windows dual-tunnel launchers, and additional integration tests. See [NOTICE.md](NOTICE.md) and [CHANGELOG.md](CHANGELOG.md).
+The enhanced branch adds and hardens direct ChatGPT attachment saving, ChatGPT web tool profiles, MCP session recovery, checkpoint/rewind support, verified binary-file transfer, file inspection, Windows dual-tunnel launchers, a portable Windows desktop client, and a safe Skill/plugin lifecycle. See [NOTICE.md](NOTICE.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## What it does
 
@@ -47,7 +47,7 @@ ChatGPT Web
  .part -> size/SHA256 -> final file
 ```
 
-Current automated tests verify **53 statically registered native tools**. The default `slim` profile exposes **39** tools to keep ChatGPT's `tools/list` payload smaller; `full` exposes all native tools.
+Current automated tests verify **70 statically registered native tools**. The default `slim` profile exposes **30** tools to keep ChatGPT's `tools/list` payload smaller; `full` exposes all native tools.
 
 Highlights:
 
@@ -66,12 +66,14 @@ Highlights:
 - local Admin UI and optional upstream MCP hub
 - OpenAI Secure MCP Tunnel helpers on Windows
 - optional Free/Business dual-tunnel launchers sharing one local MCP server
+- Windows Electron client with portable, setup, and ZIP packaging
+- Skill/plugin install, uninstall, enable, disable, alias resolution, and priority handling without executing package scripts
 
 ## Project status
 
 **Active maintenance.** The repository is intended to remain deployable from a clean clone. User-facing changes are recorded in [CHANGELOG.md](CHANGELOG.md), automated verification runs in GitHub Actions, and bug reports or focused pull requests are welcome through GitHub Issues/PRs.
 
-Current tested baseline: **39 tools in `slim`** and **53 native tools in the full catalog**.
+Current tested baseline: **30 tools in `slim`** and **70 native tools in the full catalog**.
 
 Session retention defaults are tuned for ChatGPT web workloads: idle sessions expire after 5 minutes, cleanup runs every 30 seconds, and at most 32 retained sessions are kept by default. These values are configurable with `MCP_SESSION_TTL_MS`, `MCP_SESSION_CLEANUP_MS`, and `MCP_SESSION_MAX_COUNT`. Evicted or expired session IDs remain recoverable on the next tool call, so this retention policy does not expire the ChatGPT conversation itself.
 
@@ -193,6 +195,26 @@ stop-business-plugin.cmd
 
 Both roles share the same port-3000 MCP process and therefore the same configured `WORKSPACE_PATH`; the launchers only separate the tunnel processes. See [docs/WINDOWS_DUAL_TUNNEL.md](docs/WINDOWS_DUAL_TUNNEL.md).
 
+## Windows desktop client
+
+The `desktop/` project is an Electron launcher for the local MCP server and Secure MCP Tunnel. It stores configuration, logs, and installed Skills in the user's runtime directory, not in the repository. The public package intentionally ships **no app-level preinstalled Skills**; Skills are added from the desktop UI, the Admin API, or the MCP lifecycle tools after you choose a local directory or ZIP package.
+
+Build and test the client from a clean clone:
+
+```powershell
+npm ci
+npm run build
+npm --prefix desktop ci
+npm --prefix desktop test
+npm --prefix desktop run dist
+```
+
+`dist` produces Windows setup and portable artifacts under the ignored `desktop/release/` directory. Portable launches use an isolated per-launch unpack directory and validate a staged payload manifest before starting the UI or MCP service, so a partial or concurrent unpack fails closed. The desktop client also uses Electron's bundled Node runtime for child processes; a target computer does not need a separate system Node installation. See [docs/DESKTOP_CLIENT.md](docs/DESKTOP_CLIENT.md).
+
+### Skills and plugins
+
+Skills are instruction packages rooted at `SKILL.md`; they never execute package scripts. Project Skills live under `<workspace>/.claude/skills/`, installed Skills are kept in the runtime's `local-skills/` directory, and external Skills can be registered by absolute `SKILL.md` path. Plugin/tool providers remain MCP upstream servers and do not become implicit shell commands. See [docs/SKILL_PLUGIN_LAYER.md](docs/SKILL_PLUGIN_LAYER.md).
+
 ## Binary files and large ChatGPT attachments
 
 For a file attached to the current ChatGPT conversation, prefer `save_chatgpt_file`. ChatGPT supplies a temporary authorized attachment reference through the MCP `openai/fileParams` mechanism, and the local MCP streams the original bytes directly to disk instead of sending the whole file through Base64 tool arguments.
@@ -234,8 +256,8 @@ Set in `.env`:
 CHATGPT_TOOL_PROFILE=slim
 ```
 
-- `slim`: 39 tools in the current test suite; optimized for ChatGPT web discovery.
-- `full`: all 53 statically registered native tools.
+- `slim`: 30 tools in the current test suite; optimized for ChatGPT web discovery.
+- `full`: all 70 statically registered native tools.
 
 Core filesystem tools exposed in `slim` include:
 
@@ -246,6 +268,11 @@ file_info
 write_file
 write_file_base64
 save_chatgpt_file
+list_skills
+load_skill
+install_skill
+uninstall_skill
+set_skill_enabled
 edit_file
 multi_edit
 apply_patch

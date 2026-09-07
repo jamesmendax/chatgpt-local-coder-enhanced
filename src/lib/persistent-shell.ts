@@ -20,6 +20,7 @@ export interface ShellExecResult {
 }
 
 import { loadGlobalShellState, saveGlobalShellState } from "./global-shell-state.js";
+import { childProcessEnv } from "./child-env.js";
 
 let sessionCwd: string | null = null;
 let sessionInitializedAt: string | null = null;
@@ -275,7 +276,7 @@ function runOnce(command: string, cwd: string, timeoutMs: number): Promise<Shell
       cwd,
       windowsHide: true,
       env: {
-        ...process.env,
+        ...childProcessEnv(),
         CI: "true",
         PAGER: "cat",
         GIT_PAGER: "cat",

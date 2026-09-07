@@ -17,6 +17,12 @@ log_console.txt
 *.part
 *.tmp
 
+# Desktop build output and local dependency/cache state
+desktop/node_modules/
+desktop/staging/
+desktop/release/
+desktop/.cache/
+
 # Local binaries and generated tunnel profiles
 bin/
 profiles/*

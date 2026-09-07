@@ -12,7 +12,9 @@ import {
 } from "../lib/mcp-upstream-config.js";
 import { getDefaultCwd, getFullDiskAccess } from "../lib/path-security.js";
 import { getCheckpointConfig } from "../lib/checkpoint.js";
-import { getLocalPluginsConfig, saveLocalPluginsConfig } from "../lib/plugin-config.js";
+import { getLocalPluginsConfig, getLocalPluginsConfigPath, getRegistryEntries, saveLocalPluginsConfig } from "../lib/plugin-config.js";
+import { getSkillCodeRoot, getSkillInstalledDir, resolveAllSkills } from "../lib/skills-loader.js";
+import { installSkill, setSkillEnabled, SkillInstallerError, uninstallSkill } from "../lib/skill-installer.js";
 import { getCodexHooks, saveCodexHooks } from "../lib/codex-hooks.js";
 import {
   getRecentActivity,
@@ -67,6 +69,7 @@ export function createAdminRouter(manager: McpUpstreamManager, options: {
   mcpPort: number;
   pid: number;
   sessionCount: () => number;
+  workspaceRoot?: string;
   instructionSummary?: () => Record<string, unknown>;
   instructionsPreview?: () => string;
 }): Router {
@@ -141,14 +144,108 @@ export function createAdminRouter(manager: McpUpstreamManager, options: {
   });
 
   router.get("/api/plugins", (_req, res) => {
-    res.json({ ok: true, config: getLocalPluginsConfig(), available: { computer_use: process.platform === "win32" } });
+    res.json({
+      ok: true,
+      config: getLocalPluginsConfig(),
+      available: { computer_use: process.platform === "win32" },
+      registered_skill_count: getRegistryEntries().length,
+    });
   });
 
   router.put("/api/plugins", (req, res) => {
     const computerUseEnabled = req.body?.config?.computer_use?.enabled === true;
-    const next = { computer_use: { enabled: computerUseEnabled } };
+    const next = { ...getLocalPluginsConfig(), computer_use: { enabled: computerUseEnabled } };
     saveLocalPluginsConfig(next);
     res.json({ ok: true, config: next, restart_required: "Open a new ChatGPT MCP session after changing plugin state." });
+  });
+
+  const skillPaths = () => ({
+    workspaceRoot: path.resolve(options.workspaceRoot || process.env.WORKSPACE_PATH || process.cwd()),
+    codeRoot: getSkillCodeRoot(),
+    installedDir: getSkillInstalledDir(),
+    registryPath: getLocalPluginsConfigPath(),
+  });
+  const installerError = (err: unknown): { status: number; error: string; candidates?: string[] } => {
+    if (err instanceof SkillInstallerError) return { status: err.status, error: err.message, ...(err.candidates ? { candidates: err.candidates } : {}) };
+    return { status: 500, error: err instanceof Error ? err.message : String(err) };
+  };
+
+  router.get("/api/skills", async (_req: Request, res: Response) => {
+    try {
+      const paths = skillPaths();
+      const skills = await resolveAllSkills(paths.workspaceRoot);
+      res.json({ ok: true, skills, paths });
+    } catch (err) {
+      const failure = installerError(err);
+      res.status(failure.status).json({ ok: false, error: failure.error, ...(failure.candidates ? { candidates: failure.candidates } : {}) });
+    }
+  });
+
+  router.post("/api/skills/install", async (req: Request, res: Response) => {
+    try {
+      const source = typeof req.body?.source === "string" ? req.body.source.trim() : "";
+      if (!source || !path.isAbsolute(source)) {
+        res.status(400).json({ ok: false, error: "source must be an absolute local directory" });
+        return;
+      }
+      const paths = skillPaths();
+      const result = await installSkill({
+        source,
+        id: typeof req.body.id === "string" ? req.body.id : undefined,
+        overwrite: req.body.overwrite !== false,
+        localSkillsDir: paths.installedDir,
+        registryPath: paths.registryPath,
+      });
+      res.status(201).json({ ok: true, result, skills: await resolveAllSkills(paths.workspaceRoot) });
+    } catch (err) {
+      const failure = installerError(err);
+      res.status(failure.status).json({ ok: false, error: failure.error, ...(failure.candidates ? { candidates: failure.candidates } : {}) });
+    }
+  });
+
+  router.delete("/api/skills/:id", async (req: Request, res: Response) => {
+    try {
+      const paths = skillPaths();
+      const result = await uninstallSkill({
+        id: String(req.params.id),
+        localSkillsDir: paths.installedDir,
+        registryPath: paths.registryPath,
+        codeRoot: paths.codeRoot,
+        workspaceRoot: paths.workspaceRoot,
+      });
+      res.json({ ok: true, result });
+    } catch (err) {
+      const failure = installerError(err);
+      res.status(failure.status).json({ ok: false, error: failure.error, ...(failure.candidates ? { candidates: failure.candidates } : {}) });
+    }
+  });
+
+  router.put("/api/skills/:id/enabled", async (req: Request, res: Response) => {
+    try {
+      if (typeof req.body?.enabled !== "boolean") {
+        res.status(400).json({ ok: false, error: "enabled must be boolean" });
+        return;
+      }
+      const paths = skillPaths();
+      const source = req.body.source === undefined ? undefined : req.body.source;
+      if (source !== undefined && !["installed", "external", "builtin"].includes(source)) {
+        res.status(400).json({ ok: false, error: "source must be installed, external, or builtin" });
+        return;
+      }
+      const result = await setSkillEnabled({
+        id: String(req.params.id),
+        enabled: req.body.enabled,
+        source,
+        localSkillsDir: paths.installedDir,
+        registryPath: paths.registryPath,
+        codeRoot: paths.codeRoot,
+        workspaceRoot: paths.workspaceRoot,
+      });
+      res.json({ ok: true, result });
+    } catch (err) {
+      const failure = installerError(err);
+      res.status(failure.status).json({ ok: false, error: failure.error, ...(failure.candidates ? { candidates: failure.candidates } : {}) });
+    }
   });
 
   router.get("/api/codex-hooks", async (_req, res) => {

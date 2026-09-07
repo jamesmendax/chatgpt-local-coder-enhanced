@@ -40,7 +40,7 @@ ChatGPT Web
     |
     | MCP over tunnel
     v
-Stable 27-tool surface
+Stable 30-tool slim surface
     |
     +--> Execution tools -----------------------------+
     |                                                |
@@ -105,7 +105,7 @@ The broker is attached to structured MCP tool results as `data.harness_context`.
 
 ## Compatibility rules
 
-- Keep the ChatGPT Web slim surface stable at 27 tools.
+- Keep the ChatGPT Web slim surface stable at 30 tools, including the Skill lifecycle operations.
 - Do not add a model-loop abstraction to the MCP.
 - Do not remove Goal/task snapshot persistence until event replay/projection migration is separately proven.
 - Do not allow event logging failure to break local execution during the compatibility phase.
@@ -121,5 +121,5 @@ The phase is considered structurally ready when:
 - Goal/task/tool/evidence events are append-only with contiguous sequence numbers.
 - Context Broker returns task/Goal/evidence for the matching project and does not leak them to another project.
 - Existing Goal Mode, durable task, context, command-observation, tool-profile, and agent-harness tests pass.
-- The slim tool surface remains exactly 27 tools within the existing schema budget.
+- The slim tool surface remains exactly 30 tools within the existing schema budget.
 - After a manual production MCP restart, real ChatGPT Web tool results expose the new `harness_context` from the loaded build.

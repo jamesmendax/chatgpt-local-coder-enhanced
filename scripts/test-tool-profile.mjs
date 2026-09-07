@@ -15,7 +15,7 @@ function ok(m) { console.log(`OK  ${m}`); passed++; }
 function fail(m, e) { console.error(`FAIL ${m}: ${e}`); failed++; }
 
 try {
-  if (SLIM_CHATGPT_TOOLS.size !== 27) throw new Error(`expected 27 slim tools, got ${SLIM_CHATGPT_TOOLS.size}`);
+  if (SLIM_CHATGPT_TOOLS.size !== 30) throw new Error(`expected 30 slim tools, got ${SLIM_CHATGPT_TOOLS.size}`);
   ok(`slim profile has ${SLIM_CHATGPT_TOOLS.size} tools`);
 
   for (const t of [
@@ -24,6 +24,7 @@ try {
     "run_command", "shell_status", "start_process", "process_status", "process_output", "stop_process",
     "git_status", "git_diff", "project_context", "list_skills", "load_skill",
     "goal", "task_state", "visual_review", "rewind",
+    "install_skill", "uninstall_skill", "set_skill_enabled",
   ]) {
     if (!shouldExposeTool(t, "slim")) throw new Error(`${t} missing from slim`);
   }

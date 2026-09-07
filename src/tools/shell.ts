@@ -7,6 +7,7 @@ import { audit } from "../lib/audit.js";
 import { toolAnnotations } from "../lib/tool-annotations.js";
 import { toolResult } from "../lib/tool-result.js";
 import { compactOutput, observeCommand } from "../lib/command-observation.js";
+import { childProcessEnv } from "../lib/child-env.js";
 import { toSpillRef } from "../lib/spill.js";
 import {
   bootstrapShellSession,
@@ -219,7 +220,7 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
         cwd,
         windowsHide: true,
         env: {
-          ...process.env,
+          ...childProcessEnv(),
           CI: "true",
           PAGER: "cat",
           GIT_PAGER: "cat",

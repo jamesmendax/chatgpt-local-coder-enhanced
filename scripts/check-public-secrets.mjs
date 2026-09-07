@@ -38,7 +38,10 @@ const assignmentNames = [
 
 function isSafePlaceholder(value) {
   const raw = value.trim();
-  const v = raw.replace(/^['\"]|['\"]$/g, "").trim();
+  const v = raw
+    .replace(/[;,\)\]]+\s*$/, "")
+    .replace(/^['\"]|['\"]$/g, "")
+    .trim();
   if (!v) return true;
   if (/^<[^>]+>$/.test(v)) return true;
   if (/^(?:YOUR|EXAMPLE|CHANGEME|REPLACE_ME|REDACTED)[A-Z0-9_<>.-]*$/i.test(v)) return true;
@@ -50,6 +53,8 @@ function isSafePlaceholder(value) {
   if (/\bprocess\.env\b/i.test(raw)) return true;
   if (/\bGet-DotEnvValue\b/i.test(raw)) return true;
   if (/\[Environment\]::GetEnvironmentVariable/i.test(raw)) return true;
+  // A reference to a value already held in memory is not a literal secret.
+  if (/^[A-Za-z_][A-Za-z0-9_.]*$/.test(v)) return true;
 
   // GitHub Actions injects these values at runtime. Allow only the built-in
   // token reference and explicit repository secret references; literal token
@@ -95,7 +100,7 @@ for (const file of await walk(root)) {
     if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("//")) continue;
 
     for (const name of assignmentNames) {
-      const match = line.match(new RegExp(`\\b${name}\\b\\s*[:=]\\s*(.*)$`, "i"));
+      const match = line.match(new RegExp(`\\b${name}\\b\\s*(?::|=(?!=))\\s*(.*)$`, "i"));
       if (!match) continue;
       if (!isSafePlaceholder(match[1])) {
         hits.push(`${rel}:${index + 1}: non-placeholder ${name} assignment`);

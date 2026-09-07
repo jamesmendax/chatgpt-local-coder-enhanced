@@ -15,6 +15,7 @@ export interface AdminServerOptions {
   pid: number;
   manager: McpUpstreamManager;
   sessionCount: () => number;
+  workspaceRoot?: string;
   instructionSummary?: () => Record<string, unknown>;
   instructionsPreview?: () => string;
 }
@@ -66,6 +67,7 @@ export function startAdminServer(options: AdminServerOptions): Server {
     mcpPort: options.mcpPort,
     pid: options.pid,
     sessionCount: options.sessionCount,
+    workspaceRoot: options.workspaceRoot,
     instructionSummary: options.instructionSummary,
     instructionsPreview: options.instructionsPreview,
   }));

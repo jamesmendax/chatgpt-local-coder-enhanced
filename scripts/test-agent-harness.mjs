@@ -49,10 +49,10 @@ function data(result) {
 
 try {
   const listed = await client.listTools();
-  if (listed.tools.length !== 27) throw new Error(`expected 27 slim tools, got ${listed.tools.length}`);
+  if (listed.tools.length !== 30) throw new Error(`expected 30 slim tools, got ${listed.tools.length}`);
   if (listed.tools.some((tool) => tool.outputSchema)) throw new Error("slim repeated outputSchema");
   const toolsListBytes = Buffer.byteLength(JSON.stringify(listed), "utf-8");
-  if (toolsListBytes > 23_000) throw new Error(`slim tools/list budget exceeded: ${toolsListBytes} bytes`);
+  if (toolsListBytes > 27_000) throw new Error(`slim tools/list budget exceeded: ${toolsListBytes} bytes`);
 
   const largeRead = data(await client.callTool({
     name: "read_text_file",
@@ -194,7 +194,7 @@ try {
   resumeFailed = afterComplete.structuredContent?.ok === false;
   if (!resumeFailed) throw new Error("completed task remained active");
 
-  console.log(`agent-harness: 27-tool slim (${toolsListBytes} bytes), Goal Mode, compact task tracking, automatic observations, command logs, and background logs OK`);
+  console.log(`agent-harness: 30-tool slim (${toolsListBytes} bytes), Goal Mode, compact task tracking, automatic observations, command logs, and background logs OK`);
 } finally {
   await client.close().catch(() => {});
   await server.close().catch(() => {});

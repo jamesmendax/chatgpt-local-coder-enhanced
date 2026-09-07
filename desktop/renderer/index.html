@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+  <title>ChatGPT Web Harness</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <img class="brand-mark" src="logo.png" alt="" />
+      <div>
+        <div class="title">ChatGPT</div>
+        <div class="subtitle">Web Harness</div>
+      </div>
+    </div>
+    <nav class="sidebar-nav">
+      <button class="nav-item" data-view="dashboard">控制台</button>
+      <button class="nav-item" data-view="skills">Skills / 插件</button>
+      <button class="nav-item" data-view="settings">Settings</button>
+    </nav>
+    <div class="sidebar-status">
+      <span class="pill" id="pill-mcp"><i class="dot"></i><span data-label>MCP · 未知</span></span>
+      <span class="pill" id="pill-tunnel"><i class="dot"></i><span data-label>Tunnel · 未知</span></span>
+    </div>
+  </aside>
+
+  <div class="shell">
+    <header class="page-header">
+      <div>
+        <div class="page-title" id="page-title">控制台</div>
+        <div class="page-subtitle" id="page-subtitle">桌面启动器</div>
+      </div>
+      <div class="header-actions">
+        <button class="ghost small" id="btn-open-logs">日志</button>
+        <button class="ghost small" id="btn-open-runtime">运行目录</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="view" id="view-dashboard">
+        <div class="dashboard">
+          <div class="cards">
+            <div class="card status-card" id="card-mcp">
+              <div class="card-head">
+                <h3>MCP Server</h3>
+                <span class="badge" id="badge-mcp"><i class="dot"></i><span data-label>未知</span></span>
+              </div>
+              <dl>
+                <dt>来源</dt><dd id="mcp-source">—</dd>
+                <dt>PID</dt><dd id="mcp-pid">—</dd>
+                <dt>Build</dt><dd id="mcp-build">—</dd>
+                <dt>工具</dt><dd id="mcp-tools">—</dd>
+                <dt>stale_build</dt><dd id="mcp-stale">—</dd>
+                <dt>Auth</dt><dd id="mcp-auth">—</dd>
+              </dl>
+              <div class="card-actions">
+                <button class="ghost small" id="btn-mcp-start">启动</button>
+                <button class="ghost small" id="btn-mcp-stop">停止</button>
+                <button class="ghost small" id="btn-mcp-restart">重启</button>
+                <button class="link small" id="link-health">/health ↗</button>
+                <button class="link small" id="link-admin">Admin UI ↗</button>
+              </div>
+            </div>
+            <div class="card status-card" id="card-tunnel">
+              <div class="card-head">
+                <h3>Secure MCP Tunnel</h3>
+                <span class="badge" id="badge-tunnel"><i class="dot"></i><span data-label>未知</span></span>
+              </div>
+              <dl>
+                <dt>来源</dt><dd id="tunnel-source">—</dd>
+                <dt>PID</dt><dd id="tunnel-pid">—</dd>
+                <dt>Tunnel ID</dt><dd id="tunnel-id">—</dd>
+                <dt>本地端口</dt><dd id="tunnel-port">—</dd>
+                <dt>readyz</dt><dd id="tunnel-ready">—</dd>
+                <dt>工作区</dt><dd id="tunnel-workspace">—</dd>
+              </dl>
+              <div class="card-actions">
+                <button class="ghost small" id="btn-tunnel-start">启动</button>
+                <button class="ghost small" id="btn-tunnel-stop">停止</button>
+                <button class="link small" id="link-readyz">/readyz ↗</button>
+                <button class="link small" id="link-tunnel-ui">Tunnel UI ↗</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="toolbar">
+            <button class="primary" id="btn-start-all">启动全部</button>
+            <button class="quiet-danger" id="btn-stop-all">停止全部</button>
+            <button class="ghost" id="btn-stop-external" title="终止由旧脚本启动、非本启动器管理的 MCP / Tunnel 进程">接管外部进程</button>
+            <span class="spacer"></span>
+          </div>
+
+          <div class="card logs">
+            <div class="log-tabs">
+              <button class="tab active" data-log="mcp">MCP</button>
+              <button class="tab" data-log="tunnel">Tunnel</button>
+              <button class="tab" data-log="launcher">启动器</button>
+              <span class="log-hint small muted" id="log-hint"></span>
+              <span class="spacer"></span>
+              <label class="check small"><input type="checkbox" id="log-autoscroll" checked /> 自动滚动</label>
+              <button class="ghost small" id="btn-open-log-file">打开文件</button>
+              <button class="ghost small" id="btn-clear-log">清空</button>
+            </div>
+            <pre class="log-view" id="log-view"></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-skills">
+        <div class="settings-frame">
+          <div class="settings-pane active" id="skills-pane">
+            <div class="card">
+              <div class="section-head">
+                <div>
+                  <h2>Skills / 插件</h2>
+                  <p class="muted">Skill 是本地说明文档，不会自动执行代码；工具型插件仍应接入 Upstream MCP。</p>
+                </div>
+                <button class="ghost small" id="btn-skills-refresh">刷新</button>
+              </div>
+              <div class="plugin-toggle">
+                <div>
+                  <div class="plugin-name">Computer Use</div>
+                  <div class="muted small">Windows 本机 UI 控制。启用后需要开启新的 ChatGPT MCP 会话。</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="chk-computer-use" /><span></span></label>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="section-head">
+                <div><h2>已安装 Skill</h2><p class="muted">发布包不预装 Skill；从本地目录或 zip 安装到运行目录。</p></div>
+                <div class="card-actions">
+                  <button class="ghost small" id="btn-install-skill-folder">安装目录</button>
+                  <button class="primary small" id="btn-install-skill-zip">安装 zip</button>
+                </div>
+              </div>
+              <div id="installed-skills-list" class="skill-list"></div>
+            </div>
+
+            <div class="card" id="install-skill-panel" hidden>
+              <div class="section-head">
+                <div><h2>确认安装</h2><p class="muted">只读取 SKILL.md 元数据；不会运行包内脚本。</p></div>
+                <button class="ghost small" id="btn-install-cancel">取消</button>
+              </div>
+              <div class="install-meta" id="install-skill-source">—</div>
+              <label><span>id（目录名，可编辑）</span><input id="f-install-id" type="text" spellcheck="false" /></label>
+              <div class="muted small" id="install-skill-details"></div>
+              <div class="skill-warnings" id="install-skill-warnings"></div>
+              <div class="actions"><button class="primary" id="btn-install-confirm">安装</button><button class="ghost" id="btn-install-cancel-2">取消</button></div>
+            </div>
+
+            <div class="card">
+              <div class="section-head">
+                <div>
+                  <h2>外部注册</h2>
+                  <p class="muted">写入 <code id="skills-config-path">profiles/plugins.json</code>，只接受本机绝对路径；保存不影响已安装行。</p>
+                </div>
+                <button class="primary small" id="btn-skills-save">保存外部注册</button>
+              </div>
+              <div id="registered-skills-list" class="skill-list"></div>
+              <div class="skill-add">
+                <input id="f-skill-name" type="text" placeholder="名称（可选，默认读取 SKILL.md）" />
+                <input id="f-skill-path" type="text" placeholder="D:\skills\example\SKILL.md" spellcheck="false" />
+                <button class="ghost" id="btn-pick-skill">选择</button>
+                <button class="ghost" id="btn-add-skill">添加</button>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="section-head">
+                <div><h2>发现结果</h2><p class="muted">项目 Skill 只读；内置 Skill 可即时启停但不能卸载。</p></div>
+              </div>
+              <div class="discovery-grid">
+                <div>
+                  <div class="list-title">项目 Skill</div>
+                  <div id="project-skills-list" class="skill-list compact"></div>
+                </div>
+                <div>
+                  <div class="list-title">内置 Skill</div>
+                  <div id="builtin-skills-list" class="skill-list compact"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-settings">
+        <div class="settings-tabs">
+          <button class="settings-tab active" data-settings-tab="setup">初始化</button>
+          <button class="settings-tab" data-settings-tab="guide">发布指引</button>
+        </div>
+        <div class="settings-frame">
+          <div class="settings-pane active" id="settings-pane-setup">
+            <div class="card wide">
+              <h2>初始化</h2>
+              <p class="muted">只需要两样东西：在 OpenAI Platform 申请的 <b>Tunnel ID</b> 和 <b>Runtime API Key</b>。Free / Plus / Pro / Business 账号的初始化方式完全一样，只是默认分配的本地端口不同。</p>
+              <div class="links">
+                <button class="link" data-url="https://platform.openai.com/settings/organization/tunnels">获取 Tunnel ID ↗</button>
+                <button class="link" data-url="https://platform.openai.com/settings/organization/api-keys">获取 Runtime API Key ↗</button>
+              </div>
+              <form id="setup-form" autocomplete="off">
+                <label>
+                  <span>Tunnel ID</span>
+                  <input id="f-tunnel-id" type="text" placeholder="tunnel_ 后接 32 位十六进制" spellcheck="false" />
+                </label>
+                <label>
+                  <span>Runtime API Key <small id="key-hint" class="muted"></small></span>
+                  <div class="row">
+                    <input id="f-api-key" type="password" placeholder="sk-... （只保存加密后的密文，不会显示）" spellcheck="false" />
+                    <button type="button" class="ghost" id="btn-toggle-key">显示</button>
+                  </div>
+                  <div class="row" id="legacy-import-row" hidden>
+                    <span class="muted small">从旧脚本保存的加密密钥导入：</span>
+                    <span id="legacy-import-buttons"></span>
+                  </div>
+                </label>
+                <label>
+                  <span>工作区目录（ChatGPT 默认操作的项目目录，勿选本仓库）</span>
+                  <div class="row">
+                    <input id="f-workspace" type="text" placeholder="例如 C:\Users\你\Documents\项目" spellcheck="false" />
+                    <button type="button" class="ghost" id="btn-pick-workspace">浏览…</button>
+                  </div>
+                </label>
+                <details class="advanced">
+                  <summary>高级选项（默认即可）</summary>
+                  <div class="grid">
+                    <label><span>MCP 端口</span><input id="f-mcp-port" type="number" min="1" max="65535" /></label>
+                    <label><span>Tunnel 本地健康端口</span><input id="f-tunnel-port" type="number" min="1" max="65535" /></label>
+                    <label><span>Admin UI 端口</span><input id="f-admin-port" type="number" min="1" max="65535" /></label>
+                    <label>
+                      <span>工具集</span>
+                      <select id="f-tool-profile">
+                        <option value="slim">slim（30 个工具，推荐）</option>
+                        <option value="full">full（全部工具）</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label class="check"><input id="f-auto-start" type="checkbox" /> 打开启动器时自动启动服务</label>
+                  <label class="check"><input id="f-tray" type="checkbox" /> 服务运行时关闭窗口最小化到托盘</label>
+                  <label class="check"><input id="f-skip-doctor" type="checkbox" /> 跳过在线校验（tunnel-client doctor）</label>
+                  <div class="danger-zone">
+                    <div><b>Skill / 插件配置</b><p class="muted small">重置只影响两个 profile 文件，不删除已安装 Skill 或 Tunnel 配置。</p></div>
+                    <button type="button" class="ghost small" id="btn-reset-profiles">重置为默认</button>
+                  </div>
+                  <div class="danger-zone">
+                    <div><b>卸载桌面端并清理数据</b><p class="muted small">删除配置、日志和已安装 Skill；portable/zip 的 EXE 需之后手动删除。</p></div>
+                    <button type="button" class="quiet-danger small" id="btn-uninstall-app">卸载并清理数据</button>
+                  </div>
+                </details>
+                <div class="actions">
+                  <button type="submit" class="primary" id="btn-run-setup">开始初始化</button>
+                  <button type="button" class="ghost" id="btn-save-only">仅保存设置</button>
+                </div>
+              </form>
+              <div class="progress" id="setup-progress" hidden>
+                <div class="progress-title" id="setup-progress-title">进行中…</div>
+                <pre id="setup-progress-log"></pre>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-pane" id="settings-pane-guide">
+            <div class="card wide">
+              <h2>在 ChatGPT 网页端发布应用（只需一次）</h2>
+              <ol class="steps">
+                <li>确认控制台里 <b>MCP</b> 与 <b>Tunnel</b> 都已就绪（隧道必须在线，ChatGPT 才能连接）。</li>
+                <li>打开 <button class="link" data-url="https://chatgpt.com/#settings/Connectors">ChatGPT 设置 → Connectors ↗</button>，先在 <b>Security and login</b> 里开启 <b>Developer mode</b>。</li>
+                <li>新建连接器：Connection 选择 <b>Tunnel</b>（不要选 Server URL，也不要填 localhost），在列表中选中你的 tunnel，或粘贴 Tunnel ID：
+                  <div class="row"><code id="guide-tunnel-id">—</code><button class="ghost" id="btn-copy-tunnel">复制</button></div>
+                </li>
+                <li>Authentication 保持默认，点击 Create → Connect。</li>
+                <li>进入 <b>Settings → Apps</b>，找到这个应用，权限设为 <b>Allow all actions / Never ask</b>，否则 Goal 连续执行会被反复弹窗打断。</li>
+                <li>新开一个对话，添加该应用，先发一条只读探针：<code>请只读取工作区目录列表，不要修改任何文件。</code> 看到工具卡片并返回本地文件列表即成功。</li>
+              </ol>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toasts" id="toasts"></div>
+  <footer class="footer" id="footer">—</footer>
+  <script src="app.js"></script>
+</body>
+</html>
