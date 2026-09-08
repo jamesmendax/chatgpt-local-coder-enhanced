@@ -19,6 +19,7 @@ const {
   formatActiveGoalForInstructions,
   getGoal,
   GOAL_CONTINUATION_CONTRACT,
+  GOAL_WATCHDOG_POLICY,
   pauseGoal,
   resumeGoal,
   updateGoal,
@@ -47,15 +48,24 @@ try {
   if (!instructions.includes(GOAL_CONTINUATION_CONTRACT) || !instructions.includes("checkpoint, not a stop condition")) {
     throw new Error("active goal instructions missing continuous-execution contract");
   }
+  if (!instructions.includes(GOAL_WATCHDOG_POLICY) || !instructions.includes("do not manually run watchdog scripts")) {
+    throw new Error("active goal instructions missing managed watchdog policy");
+  }
 
   const context = await buildInstructionContext({ workspaceRoot: workspace, workspaceRoots: [workspace], pid: process.pid, adminPort: 0 });
-  if (!context.instructionsText.includes("ACTIVE GOAL") || !context.instructionsText.includes(created.objective)) {
-    throw new Error("instruction context did not inject active goal");
+  // Session scoping: the goal reaches windows through the HOT channel (broker
+  // snapshots/tails), never through boot instructions (which every window
+  // sharing this server would inherit).
+  if (context.instructionsText.includes("## ACTIVE GOAL") || context.instructionsText.includes(created.objective)) {
+    throw new Error("boot instructions must not leak the goal across sessions");
   }
 
   const summary = (await import("../dist/lib/goals.js")).goalSummary(created);
   if (summary.execution_mode !== "continuous" || summary.continuation_contract !== GOAL_CONTINUATION_CONTRACT) {
     throw new Error("goal summary missing structured continuous-execution contract");
+  }
+  if (summary.watchdog_policy?.mode !== "goal_scoped" || summary.watchdog_policy?.lifecycle !== "managed_by_goal" || summary.watchdog_policy?.auto_resume_web !== false) {
+    throw new Error("goal summary missing structured watchdog lifecycle policy");
   }
 
   const brokerContext = await buildHarnessRuntimeContext(workspace, workspace);

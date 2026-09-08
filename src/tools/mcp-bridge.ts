@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { McpUpstreamManager } from "../lib/mcp-upstream-manager.js";
 import { audit } from "../lib/audit.js";
+import { getRuntimeScope } from "../lib/runtime-scope.js";
 import { toolAnnotations } from "../lib/tool-annotations.js";
 import { toolResult } from "../lib/tool-result.js";
 
@@ -73,7 +74,8 @@ export function registerMcpBridgeTools(server: McpServer, manager: McpUpstreamMa
       if (!config) throw new Error(`Unknown server_id: ${server_id}`);
       if (!config.enabled) throw new Error(`Upstream server disabled: ${server_id}`);
 
-      const raw = await manager.callTool(server_id, tool, args ?? {});
+      const signal = getRuntimeScope()?.signal;
+      const raw = await manager.callTool(server_id, tool, args ?? {}, signal ? { signal } : undefined);
       const payload = normalizeCallResult(raw);
       await audit({
         tool: "mcp_call",

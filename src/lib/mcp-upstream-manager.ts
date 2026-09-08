@@ -4,6 +4,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 
 import {
   loadUpstreamConfig,
@@ -52,6 +53,11 @@ export class McpUpstreamManager {
   private servers = new Set<McpServer>();
   private toolsCache = new Map<string, { tools: Tool[]; expiresAt: number }>();
   private oauthProviders = new Map<string, FileOAuthClientProvider>();
+  private lifecycleGeneration = 0;
+  private serverGenerations = new Map<string, number>();
+  private shuttingDown = false;
+  private reconfiguring = false;
+  private shutdownPromise: Promise<void> | null = null;
   private readonly toolsCacheTtlMs = 60_000;
   private readonly connectTimeoutMs = Math.max(1_000, Number(process.env.MCP_UPSTREAM_CONNECT_TIMEOUT_MS) || 15_000);
 
@@ -89,18 +95,28 @@ export class McpUpstreamManager {
   }
 
   async reloadConfig(): Promise<UpstreamConfigFile> {
-    await this.shutdown();
-    this.config = await loadUpstreamConfig(this.configPath);
-    this.oauthProviders.clear();
+    this.reconfiguring = true;
+    try {
+      await this.shutdown();
+      this.config = await loadUpstreamConfig(this.configPath);
+      this.oauthProviders.clear();
+    } finally {
+      this.reconfiguring = false;
+    }
     await this.refreshAllProxies();
     return this.config;
   }
 
   async updateConfig(next: UpstreamConfigFile): Promise<UpstreamConfigFile> {
     await saveUpstreamConfig(next, this.configPath);
-    await this.shutdown();
-    this.config = next;
-    this.oauthProviders.clear();
+    this.reconfiguring = true;
+    try {
+      await this.shutdown();
+      this.config = next;
+      this.oauthProviders.clear();
+    } finally {
+      this.reconfiguring = false;
+    }
     await this.refreshAllProxies();
     return this.config;
   }
@@ -271,6 +287,66 @@ export class McpUpstreamManager {
     }
   }
 
+  private getServerGeneration(serverId: string): number {
+    return this.serverGenerations.get(serverId) ?? 0;
+  }
+
+  private invalidateServer(serverId: string): void {
+    this.serverGenerations.set(serverId, this.getServerGeneration(serverId) + 1);
+  }
+
+  private abortReason(signal: AbortSignal): Error {
+    if (signal.reason instanceof Error) return signal.reason;
+    return new DOMException("The operation was aborted", "AbortError");
+  }
+
+  private throwIfAborted(signal?: AbortSignal): void {
+    if (signal?.aborted) throw this.abortReason(signal);
+  }
+
+  private async waitWithSignal<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) return operation;
+    this.throwIfAborted(signal);
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = () => reject(this.abortReason(signal));
+      signal.addEventListener("abort", onAbort, { once: true });
+      operation.then(
+        (value) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
+        (error) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        }
+      );
+    });
+  }
+
+  private discoveryRequestOptions(options?: RequestOptions): RequestOptions {
+    return {
+      ...options,
+      timeout: options?.timeout ?? this.connectTimeoutMs,
+      maxTotalTimeout: options?.maxTotalTimeout ?? this.connectTimeoutMs,
+    };
+  }
+
+  private isConnectionAttemptCurrent(
+    serverId: string,
+    config: UpstreamServerConfig,
+    lifecycleGeneration: number,
+    serverGeneration: number
+  ): boolean {
+    return (
+      !this.shuttingDown &&
+      !this.reconfiguring &&
+      this.lifecycleGeneration === lifecycleGeneration &&
+      this.getServerGeneration(serverId) === serverGeneration &&
+      this.getServerConfig(serverId) === config &&
+      config.enabled
+    );
+  }
+
   private async connectClient(
     client: Client,
     transport: StdioClientTransport | StreamableHTTPClientTransport,
@@ -285,6 +361,9 @@ export class McpUpstreamManager {
   }
 
   async connect(serverId: string, force = false): Promise<UpstreamConnection> {
+    if (this.shuttingDown || this.reconfiguring) {
+      throw new Error(`Upstream manager is changing configuration: ${serverId}`);
+    }
     const config = this.getServerConfig(serverId);
     if (!config) throw new Error(`Unknown upstream server: ${serverId}`);
     if (!config.enabled) throw new Error(`Upstream server disabled: ${serverId}`);
@@ -306,10 +385,15 @@ export class McpUpstreamManager {
 
     if (existing) await this.disconnect(serverId);
 
+    const lifecycleGeneration = this.lifecycleGeneration;
+    const serverGeneration = this.getServerGeneration(serverId);
     const attempt = (async (): Promise<UpstreamConnection> => {
       const { client, transport, pid } = await this.withConnectTimeout(this.createTransport(config), serverId);
       try {
-        const list = await this.withConnectTimeout(client.listTools(), serverId);
+        const list = await this.withConnectTimeout(
+          client.listTools(undefined, this.discoveryRequestOptions()),
+          serverId
+        );
         const tools = list.tools ?? [];
         const conn: UpstreamConnection = {
           config,
@@ -323,6 +407,11 @@ export class McpUpstreamManager {
         };
         if (config.transport === "stdio" && pid) {
           (conn as UpstreamConnection & { pid?: number }).pid = pid;
+        }
+
+        if (!this.isConnectionAttemptCurrent(serverId, config, lifecycleGeneration, serverGeneration)) {
+          await transport.close().catch(() => undefined);
+          throw new Error(`Upstream connection superseded before activation: ${serverId}`);
         }
 
         this.connections.set(serverId, conn);
@@ -343,38 +432,77 @@ export class McpUpstreamManager {
   }
 
   async disconnect(serverId: string): Promise<void> {
+    this.invalidateServer(serverId);
+    const pending = this.connecting.get(serverId);
+    if (pending) await pending.catch(() => undefined);
     const conn = this.connections.get(serverId);
-    if (!conn) return;
-    if (conn.idleTimer) clearTimeout(conn.idleTimer);
-    try {
-      await conn.transport.close();
-    } catch {}
+    if (conn) {
+      if (conn.idleTimer) clearTimeout(conn.idleTimer);
+      try {
+        await conn.transport.close();
+      } catch {}
+    }
     this.connections.delete(serverId);
     this.toolsCache.delete(serverId);
   }
 
   async shutdown(): Promise<void> {
-    for (const id of [...this.connections.keys()]) {
-      await this.disconnect(id);
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.shutdownPromise = (async () => {
+      this.shuttingDown = true;
+      this.lifecycleGeneration++;
+      const ids = new Set([...this.connections.keys(), ...this.connecting.keys()]);
+      for (const id of ids) this.invalidateServer(id);
+      try {
+        for (const [id, conn] of [...this.connections.entries()]) {
+          if (conn.idleTimer) clearTimeout(conn.idleTimer);
+          await conn.transport.close().catch(() => undefined);
+          this.connections.delete(id);
+        }
+        await Promise.allSettled([...this.connecting.values()]);
+        for (const [id, conn] of [...this.connections.entries()]) {
+          if (conn.idleTimer) clearTimeout(conn.idleTimer);
+          await conn.transport.close().catch(() => undefined);
+          this.connections.delete(id);
+        }
+        this.connecting.clear();
+        this.toolsCache.clear();
+      } finally {
+        this.shuttingDown = false;
+      }
+    })();
+    try {
+      await this.shutdownPromise;
+    } finally {
+      this.shutdownPromise = null;
     }
   }
 
-  async listTools(serverId: string): Promise<Tool[]> {
+  async listTools(serverId: string, options?: RequestOptions): Promise<Tool[]> {
+    this.throwIfAborted(options?.signal);
     const cached = this.toolsCache.get(serverId);
     if (cached && cached.expiresAt > Date.now()) return cached.tools;
 
-    const conn = await this.connect(serverId);
-    const list = await conn.client.listTools();
+    const conn = await this.waitWithSignal(this.connect(serverId), options?.signal);
+    this.throwIfAborted(options?.signal);
+    const list = await conn.client.listTools(undefined, this.discoveryRequestOptions(options));
     const tools = list.tools ?? [];
     conn.tools = tools;
     this.toolsCache.set(serverId, { tools, expiresAt: Date.now() + this.toolsCacheTtlMs });
     return tools;
   }
 
-  async callTool(serverId: string, toolName: string, args: Record<string, unknown> = {}): Promise<unknown> {
-    const conn = await this.connect(serverId);
+  async callTool(
+    serverId: string,
+    toolName: string,
+    args: Record<string, unknown> = {},
+    options?: RequestOptions
+  ): Promise<unknown> {
+    this.throwIfAborted(options?.signal);
+    const conn = await this.waitWithSignal(this.connect(serverId), options?.signal);
+    this.throwIfAborted(options?.signal);
     this.touch(conn);
-    const result = await conn.client.callTool({ name: toolName, arguments: args });
+    const result = await conn.client.callTool({ name: toolName, arguments: args }, undefined, options);
     return result;
   }
 

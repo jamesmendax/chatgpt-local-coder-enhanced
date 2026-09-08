@@ -3,8 +3,9 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import { getVisualReviewFreshness } from "./visual-review-state.js";
-import { assertGoalAllowsTaskCompletion, getGoal } from "./goals.js";
+import { assertGoalAllowsTaskCompletion, getGoal, goalVisibleToSession } from "./goals.js";
 import { appendHarnessEventSafe, type HarnessEvidenceKind } from "./harness-events.js";
+import { getRuntimeScope } from "./runtime-scope.js";
 import { inferProjectRootsFromPaths, inferProjectScope, isPathWithinRoots } from "./project-scope.js";
 import { notifyStateInvalidated } from "./state-invalidate.js";
 
@@ -71,6 +72,7 @@ export interface DurableTask {
   recent_events: TaskEvent[];
   project_roots: string[];
   project_scope_locked: boolean;
+  owner_session?: string;
   checkpoint_no: number;
   visual_required: boolean;
   blocked?: TaskBlockedReason;
@@ -96,6 +98,7 @@ export interface TaskHandoff {
   blocking_remaining: number;
   advisory_remaining: number;
   observed_checks: TaskCheck[];
+  owner_session?: string;
   blocked?: TaskBlockedReason;
   last_failure?: TaskFailure;
   recent_events: TaskEvent[];
@@ -125,6 +128,10 @@ const MAX_CHANGED_FILES = 40;
 
 function workspaceKey(workspaceRoot: string): string {
   return path.resolve(workspaceRoot).toLowerCase();
+}
+
+function currentSessionId(): string | undefined {
+  return getRuntimeScope()?.mcpSessionId;
 }
 
 async function withWorkspaceLock<T>(workspaceRoot: string, operation: () => Promise<T>): Promise<T> {
@@ -188,6 +195,9 @@ export async function recordGoalStallTelemetry(workspaceRoot: string): Promise<v
     if (gap <= 0) return;
     const goal = await getGoal(workspaceRoot);
     if (!goal || goal.status !== "active") return;
+    // Session scoping: another ChatGPT window's activity must not consume this
+    // goal's stall signal (and vice versa).
+    if (!goalVisibleToSession(goal, currentSessionId())) return;
 
     const activeTaskId = await getActiveTaskId(workspaceRoot);
     let lastActivity = Date.parse(goal.updated_at);
@@ -210,8 +220,6 @@ export async function recordGoalStallTelemetry(workspaceRoot: string): Promise<v
     const throttleKey = workspaceKey(workspaceRoot);
     const lastNotified = lastStallNotified.get(throttleKey) ?? 0;
     if (Date.now() - lastNotified <= gap) return;
-    lastStallNotified.set(throttleKey, Date.now());
-    pruneStallThrottle();
 
     await appendHarnessEventSafe(workspaceRoot, {
       type: "goal/stall",
@@ -224,6 +232,10 @@ export async function recordGoalStallTelemetry(workspaceRoot: string): Promise<v
         scope: taskId ? "task" : "goal_only",
       },
     });
+    // Stamp the throttle only after the event is durably handed off, so a
+    // failed write retries on the next call instead of suppressing a stall.
+    lastStallNotified.set(throttleKey, Date.now());
+    pruneStallThrottle();
   } catch {}
 }
 
@@ -291,6 +303,7 @@ function normalizeTask(
         ? [path.resolve(workspaceRoot)]
         : [],
     project_scope_locked: raw.project_scope_locked ?? false,
+    ...(raw.owner_session ? { owner_session: raw.owner_session } : {}),
     ...(raw.blocked && typeof raw.blocked === "object"
       ? { blocked: raw.blocked as TaskBlockedReason }
       : {}),
@@ -349,16 +362,23 @@ async function recordTaskChange(workspaceRoot: string, operation: string, task: 
   });
 }
 
-async function setActiveTaskId(workspaceRoot: string, taskId: string | null): Promise<void> {
-  const key = workspaceKey(workspaceRoot);
+function activeTaskPathFor(workspaceRoot: string, sessionId?: string): string {
+  const dir = durableTaskDir(workspaceRoot);
+  return sessionId
+    ? path.join(dir, `active-task.${sessionId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 80)}.json`)
+    : path.join(dir, "active-task.json");
+}
+
+async function setActiveTaskId(workspaceRoot: string, sessionId: string | undefined, taskId: string | null): Promise<void> {
+  const key = `${workspaceKey(workspaceRoot)}::${sessionId ?? "legacy"}`;
   const previous = activeTaskCache.get(key)?.taskId ?? null;
   const updatedAt = Date.now();
   activeTaskCache.set(key, { taskId, updatedAt });
-  const filePath = activeTaskPath(workspaceRoot);
+  const filePath = activeTaskPathFor(workspaceRoot, sessionId);
   if (!taskId) {
     await fs.rm(filePath, { force: true });
   } else {
-    // Always rewrite: updated_at is the TTL heartbeat for the 24h pointer expiry.
+    // Always rewrite: updated_at is the TTL heartbeat for the pointer expiry.
     await atomicWriteJson(filePath, { task_id: taskId, updated_at: new Date(updatedAt).toISOString() });
   }
   // Observations re-assert the same pointer on every tool call; only a real
@@ -367,22 +387,23 @@ async function setActiveTaskId(workspaceRoot: string, taskId: string | null): Pr
   if (taskId !== previous) notifyStateInvalidated(workspaceRoot);
 }
 
-export async function getActiveTaskId(workspaceRoot: string): Promise<string | null> {
-  const key = workspaceKey(workspaceRoot);
+export async function getActiveTaskId(workspaceRoot: string, sessionId?: string): Promise<string | null> {
+  const key = `${workspaceKey(workspaceRoot)}::${sessionId ?? "legacy"}`;
+  const filePath = activeTaskPathFor(workspaceRoot, sessionId);
   const cached = activeTaskCache.get(key);
   if (cached) {
     if (!cached.taskId || Date.now() - cached.updatedAt <= ACTIVE_TASK_TTL_MS) return cached.taskId;
     activeTaskCache.delete(key);
-    await fs.rm(activeTaskPath(workspaceRoot), { force: true }).catch(() => {});
+    await fs.rm(filePath, { force: true }).catch(() => {});
     return null;
   }
   try {
-    const raw = JSON.parse(await fs.readFile(activeTaskPath(workspaceRoot), "utf-8")) as { task_id?: string; updated_at?: string };
+    const raw = JSON.parse(await fs.readFile(filePath, "utf-8")) as { task_id?: string; updated_at?: string };
     const taskId = typeof raw.task_id === "string" ? raw.task_id : null;
     const updatedAt = Date.parse(raw.updated_at || "");
     if (taskId && (!Number.isFinite(updatedAt) || Date.now() - updatedAt > ACTIVE_TASK_TTL_MS)) {
       activeTaskCache.set(key, { taskId: null, updatedAt: Date.now() });
-      await fs.rm(activeTaskPath(workspaceRoot), { force: true });
+      await fs.rm(filePath, { force: true });
       return null;
     }
     activeTaskCache.set(key, { taskId, updatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now() });
@@ -433,7 +454,7 @@ export async function createDurableTask(
   };
   await withWorkspaceLock(workspaceRoot, async () => {
     await atomicWriteJson(taskPath(workspaceRoot, task.id), task);
-    await setActiveTaskId(workspaceRoot, task.id);
+    await setActiveTaskId(workspaceRoot, currentSessionId(), task.id);
     notifyStateInvalidated(workspaceRoot);
   });
   await recordTaskChange(workspaceRoot, "create", task);
@@ -464,27 +485,45 @@ export async function updateDurableTask(
     if (next.status === "completed" || next.status === "cancelled") delete next.blocked;
     await atomicWriteJson(taskPath(workspaceRoot, taskId), next);
     notifyStateInvalidated(workspaceRoot);
-    if (next.status === "active" || next.status === "blocked") await setActiveTaskId(workspaceRoot, taskId);
-    else if ((await getActiveTaskId(workspaceRoot)) === taskId) await setActiveTaskId(workspaceRoot, null);
+    if (next.status === "active" || next.status === "blocked") await setActiveTaskId(workspaceRoot, currentSessionId(), taskId);
+    else if ((await getActiveTaskId(workspaceRoot, currentSessionId())) === taskId) await setActiveTaskId(workspaceRoot, currentSessionId(), null);
     await recordTaskChange(workspaceRoot, "update", next);
     return next;
   });
 }
 
-export async function resolveDurableTask(workspaceRoot: string, taskId?: string): Promise<DurableTask> {
-  if (taskId) return getDurableTask(workspaceRoot, taskId);
-  const activeId = await getActiveTaskId(workspaceRoot);
+export async function resolveDurableTask(
+  workspaceRoot: string,
+  taskId?: string,
+  sessionId?: string
+): Promise<DurableTask> {
+  if (taskId) {
+    const task = await getDurableTask(workspaceRoot, taskId);
+    // Session scoping: never adopt another ChatGPT window's task.
+    if (task.owner_session && sessionId && task.owner_session !== sessionId) {
+      throw new Error(
+        `This task belongs to a different ChatGPT window (session ${task.owner_session.slice(0, 8)}…). ` +
+        `Create a task in this window, or goal(action=bind) to take over its goal.`
+      );
+    }
+    return task;
+  }
+  const session = currentSessionId();
+  const activeId = await getActiveTaskId(workspaceRoot, session);
   if (activeId) {
     try {
-      return await getDurableTask(workspaceRoot, activeId);
-    } catch {
-      await setActiveTaskId(workspaceRoot, null);
-    }
+      const task = await getDurableTask(workspaceRoot, activeId);
+      if (!task.owner_session || !session || task.owner_session === session) return task;
+    } catch {}
   }
   const recent = await listDurableTasks(workspaceRoot, { limit: 20 });
-  const resumable = recent.find((task) => task.status === "active" || task.status === "blocked");
+  const resumable = recent.find(
+    (task) =>
+      (task.status === "active" || task.status === "blocked") &&
+      (!task.owner_session || !session || task.owner_session === session)
+  );
   if (!resumable) throw new Error("No active task. Create one with task_state action=create.");
-  await setActiveTaskId(workspaceRoot, resumable.id);
+  await setActiveTaskId(workspaceRoot, session, resumable.id);
   return resumable;
 }
 
@@ -545,7 +584,7 @@ export async function checkpointDurableTask(
       ].slice(-MAX_EVENTS),
     };
     await atomicWriteJson(taskPath(workspaceRoot, next.id), next);
-    await setActiveTaskId(workspaceRoot, next.id);
+    await setActiveTaskId(workspaceRoot, currentSessionId(), next.id);
     notifyStateInvalidated(workspaceRoot);
     await recordTaskChange(workspaceRoot, "checkpoint", next);
     return next;
@@ -718,7 +757,8 @@ export async function recordToolObservation(
   thrownError?: unknown
 ): Promise<void> {
   if (tool === "task_state" || tool.startsWith("task_")) return;
-  const taskId = await getActiveTaskId(workspaceRoot);
+  const session = currentSessionId();
+  const taskId = await getActiveTaskId(workspaceRoot, session);
   if (!taskId) return;
 
   await withWorkspaceLock(workspaceRoot, async () => {
@@ -726,9 +766,11 @@ export async function recordToolObservation(
     try {
       task = await getDurableTask(workspaceRoot, taskId);
     } catch {
-      await setActiveTaskId(workspaceRoot, null);
+      await setActiveTaskId(workspaceRoot, session, null);
       return;
     }
+    // Session scoping: never write observations into another window's task.
+    if (task.owner_session && session && task.owner_session !== session) return;
     if (task.status !== "active" && task.status !== "blocked") return;
 
     const payload = resultPayload(result);
@@ -833,7 +875,7 @@ export async function recordToolObservation(
           }),
     };
     await atomicWriteJson(taskPath(workspaceRoot, taskId), next);
-    await setActiveTaskId(workspaceRoot, taskId);
+    await setActiveTaskId(workspaceRoot, currentSessionId(), taskId);
     // Observation mutations (recent_events/observed_checks/changed_files) do
     // not alter any field the broker snapshot renders, so no invalidation here.
     const evidenceKind = observationEvidenceKind(tool, data);

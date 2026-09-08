@@ -8,6 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpServer } from "../server-factory.js";
+import { resetHarnessSnapshotRetention } from "./context-broker.js";
 import { getUpstreamManager } from "./mcp-upstream-manager.js";
 import { refreshProxiedTools } from "./mcp-tool-proxy.js";
 import { runCodexSessionStartHooks } from "./codex-hooks.js";
@@ -284,6 +285,9 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
         };
         clearPendingRecovery(sid);
         enforceSessionLimit(sid);
+        // Per-session snapshot retention: a fresh ChatGPT conversation must
+        // re-receive the harness snapshot on its first tool result.
+        resetHarnessSnapshotRetention(config.workspaceRoot, sid);
         console.log(`[MCP] Session initialized: ${sid}`);
       },
       onsessionclosed: (sid) => {

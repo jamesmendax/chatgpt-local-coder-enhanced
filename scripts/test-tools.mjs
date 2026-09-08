@@ -37,7 +37,32 @@ await fs.mkdir(tmpDir, { recursive: true });
 
 await run("glob finds typescript files", async () => {
   const matches = await globFiles(root, "src/**/*.ts", 50);
-  if (!matches.some((m) => m.path.endsWith("filesystem.ts"))) throw new Error("filesystem.ts not found");
+  if (matches.length === 0 || matches.length > 50) throw new Error(`unexpected match count ${matches.length}`);
+});
+
+await run("glob **/ includes root files and maxResults keeps globally newest matches", async () => {
+  const globRoot = await fs.mkdtemp(path.join(tmpDir, "glob-limit-"));
+  await fs.mkdir(path.join(globRoot, "nested"), { recursive: true });
+  const fixtures = [
+    [path.join(globRoot, "root.txt"), 1],
+    [path.join(globRoot, "nested", "old.txt"), 2],
+    [path.join(globRoot, "nested", "newest.txt"), 4],
+    [path.join(globRoot, "later.txt"), 3],
+  ];
+  for (const [filePath, seconds] of fixtures) {
+    await fs.writeFile(filePath, String(seconds), "utf8");
+    await fs.utimes(filePath, seconds, seconds);
+  }
+  const all = await globFiles(globRoot, "**/*.txt", 10);
+  if (!all.some((match) => match.path === path.join(globRoot, "root.txt"))) {
+    throw new Error("root-level file was omitted by **/ pattern");
+  }
+  const limited = await globFiles(globRoot, "**/*.txt", 2);
+  const names = limited.map((match) => path.basename(match.path));
+  if (names.join(",") !== "newest.txt,later.txt") {
+    throw new Error(`expected globally newest matches, got ${names.join(",")}`);
+  }
+  await fs.rm(globRoot, { recursive: true, force: true });
 });
 
 await run("grep content mode", async () => {

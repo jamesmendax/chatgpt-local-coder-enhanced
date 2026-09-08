@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { toolAnnotations } from "../lib/tool-annotations.js";
 import { toolError, toolResult } from "../lib/tool-result.js";
 import { getActiveTaskId, getDurableTask, updateDurableTask } from "../lib/durable-tasks.js";
+import { startGoalWatchdog, stopGoalWatchdog } from "../lib/goal-watchdog.js";
 import {
   cancelGoal,
   completeGoal,
@@ -11,6 +12,7 @@ import {
   getGoal,
   GOAL_CONTINUATION_CONTRACT,
   GOAL_GROUNDING_NOTE,
+  GOAL_WATCHDOG_POLICY,
   goalSummary,
   pauseGoal,
   resumeGoal,
@@ -20,16 +22,26 @@ import {
 const actionSchema = z.enum(["create", "status", "update", "confirm", "pause", "resume", "complete", "cancel"]);
 
 // A superseded/cancelled goal must not leave its durable task steering the
-// broker snapshot toward the old objective.
-async function cancelStaleDurableTask(workspaceRoot: string, reason: string): Promise<void> {
+// broker snapshot toward the old objective. Returns whether the cleanup ran —
+// a silent failure here would ship the new goal with the old task still active.
+async function cancelStaleDurableTask(workspaceRoot: string, reason: string): Promise<boolean> {
   try {
     const taskId = await getActiveTaskId(workspaceRoot);
-    if (!taskId) return;
+    if (!taskId) return true;
     const task = await getDurableTask(workspaceRoot, taskId);
     if (task.status === "active" || task.status === "blocked") {
       await updateDurableTask(workspaceRoot, taskId, { status: "cancelled", current_step: reason });
     }
-  } catch {}
+    return true;
+  } catch (error) {
+    console.warn(`[goal] stale durable task cleanup failed: ${error instanceof Error ? error.message : error}`);
+    return false;
+  }
+}
+
+function syncGoalWatchdog(workspaceRoot: string, status: string) {
+  if (process.env.GOAL_WATCHDOG_ENABLED === "false") return { ...stopGoalWatchdog(workspaceRoot), disabled: true };
+  return status === "active" ? startGoalWatchdog(workspaceRoot) : stopGoalWatchdog(workspaceRoot);
 }
 const criterionSchema = z.object({
   name: z.string().min(1).max(300),
@@ -44,7 +56,7 @@ export function registerGoalTool(server: McpServer, workspaceRoot: string): void
     {
       title: "Goal Mode",
       description:
-        "Create/manage persistent goals. Active goals require continuous execution: keep working after create/resume, yield only for blockers or pause/cancel, and complete goal then task before DELIVERABLE_READY.",
+        "Web goals. Active goals continue tools until completion or verified blockers. Goal actions own a fallback watchdog; never grants stop permission or Web auto-resume. Use scripts only if asked.",
       inputSchema: {
         action: actionSchema,
         objective: z.string().min(1).max(4000).optional(),
@@ -71,13 +83,18 @@ export function registerGoalTool(server: McpServer, workspaceRoot: string): void
             current_phase,
             supersede,
           });
-          if (supersede) await cancelStaleDurableTask(workspaceRoot, "Cancelled together with the superseded goal");
+          let staleTaskCancelled: boolean | undefined;
+          if (supersede) staleTaskCancelled = await cancelStaleDurableTask(workspaceRoot, "Cancelled together with the superseded goal");
+          const watchdog = syncGoalWatchdog(workspaceRoot, goal.status);
           return toolResult(
             "goal",
             {
               action,
               goal,
               summary: goalSummary(goal),
+              ...(supersede ? { stale_task_cancelled: staleTaskCancelled ?? false } : {}),
+              watchdog,
+              watchdog_policy: GOAL_WATCHDOG_POLICY,
               execution_contract: GOAL_CONTINUATION_CONTRACT,
               continue_execution: true,
             },
@@ -87,9 +104,10 @@ export function registerGoalTool(server: McpServer, workspaceRoot: string): void
 
         if (action === "status") {
           const goal = await getGoal(workspaceRoot);
+          const watchdog = goal ? syncGoalWatchdog(workspaceRoot, goal.status) : stopGoalWatchdog(workspaceRoot);
           return toolResult(
             "goal",
-            { action, goal, summary: goal ? goalSummary(goal) : null },
+            { action, goal, summary: goal ? goalSummary(goal) : null, watchdog, watchdog_policy: GOAL_WATCHDOG_POLICY },
             { summary: goal ? `goal ${goal.status}: ${goal.id}` : "no goal" }
           );
         }
@@ -101,6 +119,7 @@ export function registerGoalTool(server: McpServer, workspaceRoot: string): void
             constraints,
             current_phase,
           }, mutationOptions);
+          const watchdog = syncGoalWatchdog(workspaceRoot, goal.status);
           const needsWork = goal.status === "active" && goal.success_criteria.some((criterion) => !criterion.passed);
           return toolResult(
             "goal",
@@ -108,6 +127,8 @@ export function registerGoalTool(server: McpServer, workspaceRoot: string): void
               action,
               goal,
               summary: goalSummary(goal),
+              watchdog,
+              watchdog_policy: GOAL_WATCHDOG_POLICY,
               ...(needsWork
                 ? { continue_execution: true, execution_contract: GOAL_CONTINUATION_CONTRACT }
                 : {}),
@@ -123,6 +144,7 @@ export function registerGoalTool(server: McpServer, workspaceRoot: string): void
             detail,
             expectedRevision: expected_revision,
           });
+          const watchdog = syncGoalWatchdog(workspaceRoot, goal.status);
           const needsWork = goal.status === "active" && goal.success_criteria.some((criterion) => !criterion.passed);
           return toolResult(
             "goal",
@@ -130,6 +152,8 @@ export function registerGoalTool(server: McpServer, workspaceRoot: string): void
               action,
               goal,
               summary: goalSummary(goal),
+              watchdog,
+              watchdog_policy: GOAL_WATCHDOG_POLICY,
               ...(needsWork
                 ? { continue_execution: true, execution_contract: GOAL_CONTINUATION_CONTRACT }
                 : {}),
@@ -140,17 +164,21 @@ export function registerGoalTool(server: McpServer, workspaceRoot: string): void
 
         if (action === "pause") {
           const goal = await pauseGoal(workspaceRoot, current_phase, mutationOptions);
-          return toolResult("goal", { action, goal, summary: goalSummary(goal) }, { summary: `goal paused: ${goal.id}` });
+          const watchdog = syncGoalWatchdog(workspaceRoot, goal.status);
+          return toolResult("goal", { action, goal, summary: goalSummary(goal), watchdog, watchdog_policy: GOAL_WATCHDOG_POLICY }, { summary: `goal paused: ${goal.id}` });
         }
 
         if (action === "resume") {
           const goal = await resumeGoal(workspaceRoot, current_phase, mutationOptions);
+          const watchdog = syncGoalWatchdog(workspaceRoot, goal.status);
           return toolResult(
             "goal",
             {
               action,
               goal,
               summary: goalSummary(goal),
+              watchdog,
+              watchdog_policy: GOAL_WATCHDOG_POLICY,
               execution_contract: GOAL_CONTINUATION_CONTRACT,
               continue_execution: true,
             },
@@ -160,16 +188,18 @@ export function registerGoalTool(server: McpServer, workspaceRoot: string): void
 
         if (action === "complete") {
           const goal = await completeGoal(workspaceRoot, mutationOptions);
+          const watchdog = syncGoalWatchdog(workspaceRoot, goal.status);
           return toolResult(
             "goal",
-            { action, goal, goal_complete: true, grounding: GOAL_GROUNDING_NOTE, summary: goalSummary(goal) },
+            { action, goal, goal_complete: true, grounding: GOAL_GROUNDING_NOTE, summary: goalSummary(goal), watchdog, watchdog_policy: GOAL_WATCHDOG_POLICY },
             { summary: `GOAL_COMPLETE ${goal.id}` }
           );
         }
 
         const goal = await cancelGoal(workspaceRoot, mutationOptions);
-        await cancelStaleDurableTask(workspaceRoot, "Cancelled together with the goal");
-        return toolResult("goal", { action, goal, summary: goalSummary(goal) }, { summary: `goal cancelled: ${goal.id}` });
+        const staleTaskCancelled = await cancelStaleDurableTask(workspaceRoot, "Cancelled together with the goal");
+        const watchdog = syncGoalWatchdog(workspaceRoot, goal.status);
+        return toolResult("goal", { action, goal, stale_task_cancelled: staleTaskCancelled, summary: goalSummary(goal), watchdog, watchdog_policy: GOAL_WATCHDOG_POLICY }, { summary: `goal cancelled: ${goal.id}` });
       } catch (error) {
         return toolError("goal", error instanceof Error ? error.message : String(error));
       }

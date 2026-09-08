@@ -1,9 +1,10 @@
 import path from "node:path";
 import { getActiveTaskId, getDurableTask, taskHandoff, type TaskHandoff } from "./durable-tasks.js";
-import { GOAL_CONTINUATION_CONTRACT, getGoal, goalSummary, type DurableGoal, type GoalSummary } from "./goals.js";
+import { GOAL_CONTINUATION_SNAPSHOT, getGoal, goalSummary, goalVisibleToSession, type DurableGoal, type GoalSummary } from "./goals.js";
 import { readHarnessEventTail, harnessRepairCount, type HarnessEvidenceKind } from "./harness-events.js";
 import { inferProjectScope, isPathWithinRoot } from "./project-scope.js";
 import { onStateInvalidated } from "./state-invalidate.js";
+import { getRuntimeScope } from "./runtime-scope.js";
 
 export interface BrokerEvidenceSummary {
   seq: number;
@@ -56,10 +57,6 @@ const SKIP_TEXT_FOR: ReadonlySet<string> = new Set([
   "load_skill",
   "remember",
 ]);
-
-// These skip tools carry their own continuation signal in-band; every other
-// skip tool still gets the always-on continuation tail.
-const SELF_SIGNALING_TOOLS: ReadonlySet<string> = new Set(["goal", "task_state"]);
 
 const TAIL_ESCALATION_AFTER = 12;
 
@@ -119,8 +116,8 @@ function snapshotRefreshMs(): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 300000;
 }
 
-async function loadCoreState(workspaceRoot: string): Promise<CoreState> {
-  const [goal, activeTaskId] = await Promise.all([getGoal(workspaceRoot), getActiveTaskId(workspaceRoot)]);
+async function loadCoreState(workspaceRoot: string, sessionId?: string): Promise<CoreState> {
+  const [goal, activeTaskId] = await Promise.all([getGoal(workspaceRoot), getActiveTaskId(workspaceRoot, sessionId)]);
   let task: CoreState["task"] = null;
   if (activeTaskId) {
     try {
@@ -135,15 +132,18 @@ const coreStateCache = new Map<string, { expires: number; promise: Promise<CoreS
 // Goal/task mutations drop the cache for their workspace immediately; the TTL
 // only bounds staleness from external file edits.
 onStateInvalidated((workspaceRoot) => {
-  coreStateCache.delete(workspaceKey(workspaceRoot));
+  const prefix = `${workspaceKey(workspaceRoot)}::`;
+  for (const key of [...coreStateCache.keys()]) {
+    if (key.startsWith(prefix)) coreStateCache.delete(key);
+  }
 });
 
-function getCachedCoreState(workspaceRoot: string): Promise<CoreState> {
-  const key = workspaceKey(workspaceRoot);
+function getCachedCoreState(workspaceRoot: string, sessionId?: string): Promise<CoreState> {
+  const key = `${workspaceKey(workspaceRoot)}::${sessionId ?? "legacy"}`;
   const now = Date.now();
   const cached = coreStateCache.get(key);
   if (cached && cached.expires > now) return cached.promise;
-  const promise = loadCoreState(workspaceRoot);
+  const promise = loadCoreState(workspaceRoot, sessionId);
   coreStateCache.set(key, { expires: now + stateCacheTtlMs(), promise });
   void promise.catch(() => coreStateCache.delete(key));
   return promise;
@@ -162,8 +162,8 @@ interface EvidenceWindow {
 
 const evidenceWindows = new Map<string, EvidenceWindow>();
 
-async function refreshEvidenceWindow(workspaceRoot: string): Promise<EvidenceWindowItem[]> {
-  const key = workspaceKey(workspaceRoot);
+async function refreshEvidenceWindow(workspaceRoot: string, sessionId?: string): Promise<EvidenceWindowItem[]> {
+  const key = `${workspaceKey(workspaceRoot)}::${sessionId ?? "legacy"}`;
   const generation = harnessRepairCount(workspaceRoot);
   const win = evidenceWindows.get(key) ?? { items: [], offset: 0, repairs: generation };
   if (win.repairs !== generation) {
@@ -199,16 +199,19 @@ async function refreshEvidenceWindow(workspaceRoot: string): Promise<EvidenceWin
 
 export async function buildHarnessRuntimeContext(
   workspaceRoot: string,
-  projectRoot?: string
+  projectRoot?: string,
+  sessionId?: string
 ): Promise<HarnessRuntimeContext> {
   const resolvedProject = projectRoot ? path.resolve(projectRoot) : undefined;
-  const core = await getCachedCoreState(workspaceRoot);
+  const core = await getCachedCoreState(workspaceRoot, sessionId);
 
   let taskContext: HarnessRuntimeContext["task"];
   let taskId: string | undefined;
   let taskRoots: string[] = [];
   if (core.task) {
-    if (!resolvedProject || scopesOverlap(core.task.project_roots, [resolvedProject])) {
+    // Session scoping: another ChatGPT window's task is invisible here.
+    const taskVisible = !core.task.owner_session || !sessionId || core.task.owner_session === sessionId;
+    if (taskVisible && (!resolvedProject || scopesOverlap(core.task.project_roots, [resolvedProject]))) {
       const handoff = taskHandoff(core.task);
       taskId = core.task.id;
       taskRoots = core.task.project_roots;
@@ -231,11 +234,13 @@ export async function buildHarnessRuntimeContext(
   let goalContext: GoalSummary | undefined;
   if (core.goal) {
     const scope = await inferProjectScope(workspaceRoot, [core.goal.objective, core.goal.current_phase, ...core.goal.constraints]);
-    if (!resolvedProject || scopesOverlap(scope.roots, [resolvedProject])) goalContext = goalSummary(core.goal);
+    if ((!resolvedProject || scopesOverlap(scope.roots, [resolvedProject])) && goalVisibleToSession(core.goal, sessionId)) {
+      goalContext = goalSummary(core.goal);
+    }
   }
 
   const projectForEvidence = resolvedProject ?? taskRoots[0];
-  const windowItems = await refreshEvidenceWindow(workspaceRoot);
+  const windowItems = await refreshEvidenceWindow(workspaceRoot, sessionId);
   const recentEvidence = windowItems
     .filter((item) => !taskId || item.task_id === taskId)
     .filter((item) => !projectForEvidence || scopesOverlap(item.project_roots ?? [], [projectForEvidence]))
@@ -268,7 +273,7 @@ function renderSnapshot(context: HarnessRuntimeContext, limits: RenderLimits): s
   // Goal block renders BEFORE the task block: head-preserving truncation must
   // never be able to cut the continuation contract or the goal state away.
   if (context.goal) {
-    if (context.goal.status === "active") lines.push(`GOAL CONTINUATION CONTRACT: ${GOAL_CONTINUATION_CONTRACT}`);
+    if (context.goal.status === "active") lines.push(`GOAL CONTINUATION CONTRACT: ${GOAL_CONTINUATION_SNAPSHOT}`);
     lines.push(`ACTIVE GOAL: ${truncateForSnapshot(context.goal.objective, 300)}`);
     lines.push(`Phase: ${truncateForSnapshot(context.goal.current_phase, 200)} | status: ${context.goal.status}`);
     lines.push(`Success criteria: ${context.goal.criteria_passed}/${context.goal.criteria_total} passed`);
@@ -298,9 +303,8 @@ function renderSnapshot(context: HarnessRuntimeContext, limits: RenderLimits): s
   return lines.join("\n");
 }
 
-// The continuation contract consumes ~600 of the 1800-char snapshot budget;
-// without these caps a long objective/step pushes the status lines past
-// hardTruncate and the snapshot loses exactly the state it exists to deliver.
+// The compact continuation snapshot intentionally stays small enough that a
+// long objective/step cannot push the status lines past hardTruncate.
 function truncateForSnapshot(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, max)}…`;
 }
@@ -338,8 +342,8 @@ const retainedByWorkspace = new Map<string, RetainedSnapshot>();
  * retained text is unchanged — otherwise a new chat could stay blind to the
  * goal for up to the refresh interval.
  */
-export function resetHarnessSnapshotRetention(workspaceRoot: string): void {
-  retainedByWorkspace.delete(workspaceKey(workspaceRoot));
+export function resetHarnessSnapshotRetention(workspaceRoot: string, sessionId?: string): void {
+  retainedByWorkspace.delete(`${workspaceKey(workspaceRoot)}::${sessionId ?? "legacy"}`);
 }
 
 function withStructuredHarnessContext(result: unknown, context: HarnessRuntimeContext): unknown {
@@ -379,19 +383,22 @@ export async function appendHarnessRuntimeContextToResult(
   const hasStructuredData = Boolean(structuredData && typeof structuredData === "object" && !Array.isArray(structuredData));
   const toolName = options.toolName ?? "";
   const skipSnapshot = SKIP_TEXT_FOR.has(toolName);
-  const selfSignaling = SELF_SIGNALING_TOOLS.has(toolName);
   const canCarryText = Array.isArray(candidate.content);
   if (!skipSnapshot && !hasStructuredData && !canCarryText) return result;
 
+  // Session scoping: the goal snapshot/tail only reaches the ChatGPT window
+  // that owns (or is bound to) the active goal. Other windows are unaffected.
+  const sessionId = getRuntimeScope()?.mcpSessionId;
+
   let context: HarnessRuntimeContext;
   try {
-    context = await buildHarnessRuntimeContext(workspaceRoot);
+    context = await buildHarnessRuntimeContext(workspaceRoot, undefined, sessionId);
   } catch (error) {
     console.warn(`[harness-context] snapshot unavailable: ${(error as Error).message}`);
     return result;
   }
 
-  const key = workspaceKey(workspaceRoot);
+  const key = `${workspaceKey(workspaceRoot)}::${sessionId ?? "legacy"}`;
   // An active goal ALWAYS needs a signal: unmet criteria → "advance X" tail;
   // all-passed limbo → "run the finish chain" tail. Zero-signal gaps here are
   // how goals end up active forever.
@@ -402,8 +409,12 @@ export async function appendHarnessRuntimeContextToResult(
     // Skip tools skip the SNAPSHOT, not the continuation signal: ChatGPT's
     // turn-start preflight calls (agent_status/remember/…) and any turn ENDING
     // on one of them previously had no signal at the stop-decision point.
-    // goal/task_state are self-signaling and stay tail-free.
-    if (selfSignaling || !activeNeedsWork || !canCarryText) return withStructured;
+    // Even goal/task_state get the tail. Their in-band continue_execution /
+    // execution_hint fields are useful state, but a real Web reproduction
+    // showed that the model can still stop immediately after goal(create).
+    // The imperative tail must therefore remain the LAST model-visible text
+    // entry on every active-Goal result, including the state tools themselves.
+    if (!activeNeedsWork || !canCarryText) return withStructured;
     const retained = retainedByWorkspace.get(key) ?? { text: "", at: 0, tailStreak: 0 };
     retained.tailStreak += 1;
     retainedByWorkspace.set(key, retained);
@@ -436,7 +447,16 @@ export async function appendHarnessRuntimeContextToResult(
     return result;
   }
 
-  retainedByWorkspace.set(key, { text, at: Date.now(), tailStreak: 0 });
+  const tailStreak = activeNeedsWork && canCarryText ? 1 : 0;
+  retainedByWorkspace.set(key, { text, at: Date.now(), tailStreak });
   const withStructured = hasStructuredData ? withStructuredHarnessContext(result, context) : result;
-  return withTextEntry(withStructured, text);
+  const withSnapshot = withTextEntry(withStructured, text);
+  // A changed/full snapshot is informational context, not a continuation
+  // command. Keep the imperative tail as the LAST model-visible text entry on
+  // every ordinary tool result while a Goal is active, including reinjection
+  // calls triggered by changed task/goal state. Otherwise the exact calls that
+  // make progress can become silent stop points.
+  return activeNeedsWork && canCarryText
+    ? withTextEntry(withSnapshot, continuationTail(context, tailStreak))
+    : withSnapshot;
 }

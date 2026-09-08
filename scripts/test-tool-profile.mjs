@@ -15,7 +15,7 @@ function ok(m) { console.log(`OK  ${m}`); passed++; }
 function fail(m, e) { console.error(`FAIL ${m}: ${e}`); failed++; }
 
 try {
-  if (SLIM_CHATGPT_TOOLS.size !== 27) throw new Error(`expected 27 slim tools, got ${SLIM_CHATGPT_TOOLS.size}`);
+  if (SLIM_CHATGPT_TOOLS.size !== 30) throw new Error(`expected 30 slim tools, got ${SLIM_CHATGPT_TOOLS.size}`);
   ok(`slim profile has ${SLIM_CHATGPT_TOOLS.size} tools`);
 
   for (const t of [

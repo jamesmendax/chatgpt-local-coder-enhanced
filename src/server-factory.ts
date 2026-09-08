@@ -15,11 +15,18 @@ import { registerGoalTool } from "./tools/goal.js";
 import { registerBrowserTools } from "./tools/browser.js";
 import { buildServerInstructions } from "./lib/quickstart.js";
 import type { McpUpstreamManager } from "./lib/mcp-upstream-manager.js";
-import { getChatGptToolProfile, shouldExposeTool } from "./lib/tool-profile.js";
-import { TOOL_RESULT_OUTPUT_SCHEMA } from "./lib/tool-result.js";
 import { recordGoalStallTelemetry, recordToolObservation } from "./lib/durable-tasks.js";
 import { appendHarnessRuntimeContextToResult, resetHarnessSnapshotRetention } from "./lib/context-broker.js";
 import { appendRepeatGuardReminderToResult, recordRepeatGuardFailure } from "./lib/repeat-guard.js";
+import {
+  EffectiveToolRegistry,
+  type EffectiveToolConfig,
+  type RawToolCallback,
+} from "./lib/effective-tool-registry.js";
+import {
+  InvocationGateway,
+  type InvocationTraceRecord,
+} from "./lib/invocation-gateway.js";
 
 const NOOP_TOOL = {
   remove: () => {},
@@ -30,45 +37,107 @@ const NOOP_TOOL = {
   enabled: false,
 } as unknown as RegisteredTool;
 
-function configureToolRegistration(server: McpServer, workspaceRoot: string): void {
-  const profile = getChatGptToolProfile();
+export interface McpServerHarnessRuntime {
+  readonly registry: EffectiveToolRegistry;
+  readonly gateway: InvocationGateway;
+}
+
+const harnessRuntimeByServer = new WeakMap<McpServer, McpServerHarnessRuntime>();
+
+/** Test/diagnostic seam for the effective catalog owned by one MCP server. */
+export function getMcpServerHarnessRuntime(server: McpServer): McpServerHarnessRuntime | undefined {
+  return harnessRuntimeByServer.get(server);
+}
+
+function traceInvocation(record: InvocationTraceRecord): void {
+  const mode = (process.env.HARNESS_INVOCATION_TRACE || "off").trim().toLowerCase();
+  if (mode !== "1" && mode !== "true" && mode !== "all") return;
+  const safe = (value: string | number | undefined): string =>
+    String(value ?? "-").replace(/[\r\n\t]/g, " ").slice(0, 160);
+  const fields = [
+    `status=${record.status}`,
+    `invocation=${record.invocationId}`,
+    `tool=${safe(record.tool)}`,
+    `source=${safe(record.source)}`,
+    `session=${safe(record.sessionId)}`,
+    `request=${safe(record.requestId)}`,
+    `duration_ms=${record.durationMs}`,
+    `deadline_at=${record.deadlineAt ?? "-"}`,
+    `aborted=${record.aborted}`,
+  ];
+  if (record.errorCategory) fields.push(`error_category=${record.errorCategory}`);
+  const line = `[HARNESS] ${fields.join(" ")}`;
+  if (record.status === "failure") console.warn(line);
+  else console.log(line);
+}
+
+function configureToolRegistration(
+  server: McpServer,
+  workspaceRoot: string,
+  workspaceRoots: string[]
+): McpServerHarnessRuntime {
+  const registry = new EffectiveToolRegistry();
+  const tunnelProfile = process.env.CHATGPT_TUNNEL_PROFILE?.trim() || undefined;
+  const gateway = new InvocationGateway(
+    registry,
+    {
+      workspaceRoot,
+      projectRoots: workspaceRoots,
+      tunnelProfile,
+    },
+    {
+      onSuccess: async (context, result) => {
+        const toolName = context.definition.name;
+        await recordToolObservation(workspaceRoot, toolName, context.rawArgs, result).catch(() => undefined);
+        await recordGoalStallTelemetry(workspaceRoot).catch(() => undefined);
+        const withHarnessContext = await appendHarnessRuntimeContextToResult(workspaceRoot, result, { toolName });
+        return appendRepeatGuardReminderToResult(
+          workspaceRoot,
+          toolName,
+          context.rawArgs,
+          withHarnessContext
+        ) as typeof result;
+      },
+      onFailure: async (context, error) => {
+        const toolName = context.definition.name;
+        await recordToolObservation(
+          workspaceRoot,
+          toolName,
+          context.rawArgs,
+          undefined,
+          error
+        ).catch(() => undefined);
+        recordRepeatGuardFailure(workspaceRoot, toolName, context.rawArgs);
+      },
+      trace: traceInvocation,
+    }
+  );
   const original = server.registerTool.bind(server);
   server.registerTool = ((name, config, callback) => {
     const toolName = String(name);
-    const isUpstreamProxy = toolName.includes("__");
+    const definition = registry.prepare(
+      toolName,
+      config as EffectiveToolConfig,
+      callback as unknown as RawToolCallback
+    );
+    if (!definition) return NOOP_TOOL;
 
-    // Upstream MCP tools are namespaced as <server>__<tool>. An enabled
-    // upstream is always exposed directly, even when local tools use slim.
-    if (!isUpstreamProxy && profile !== "full" && !shouldExposeTool(toolName, profile)) {
-      return NOOP_TOOL;
-    }
+    const wrappedCallback = (async (...callbackArgs: unknown[]) =>
+      gateway.invoke(toolName, callbackArgs)) as typeof callback;
+    const registered = original(name, definition.config as any, wrappedCallback as any);
+    registry.register(definition);
 
-    // Every native Local Coder tool returns the stable
-    // { ok, tool, summary, data } structuredContent envelope. The generic
-    // output schema costs ~0.5KB per tool in tools/list, so keep advertising it
-    // for full clients but omit the repeated declaration from ChatGPT web slim.
-    // structuredContent itself is still returned in both profiles.
-    const nextConfig =
-      profile === "full" && !isUpstreamProxy && !config.outputSchema
-        ? { ...config, outputSchema: TOOL_RESULT_OUTPUT_SCHEMA }
-        : config;
-
-    const wrappedCallback = (async (...callbackArgs: any[]) => {
-      try {
-        const result = await (callback as any)(...callbackArgs);
-        await recordToolObservation(workspaceRoot, toolName, callbackArgs[0], result).catch(() => undefined);
-        await recordGoalStallTelemetry(workspaceRoot).catch(() => undefined);
-        const withHarnessContext = await appendHarnessRuntimeContextToResult(workspaceRoot, result, { toolName });
-        return appendRepeatGuardReminderToResult(workspaceRoot, toolName, callbackArgs[0], withHarnessContext);
-      } catch (error) {
-        await recordToolObservation(workspaceRoot, toolName, callbackArgs[0], undefined, error).catch(() => undefined);
-        recordRepeatGuardFailure(workspaceRoot, toolName, callbackArgs[0]);
-        throw error;
-      }
-    }) as typeof callback;
-
-    return original(name, nextConfig as any, wrappedCallback as any);
+    // Dynamic upstream refresh removes RegisteredTool handles. Mirror that
+    // lifecycle so the effective registry never keeps a stale callable tool.
+    const originalRemove = registered.remove.bind(registered);
+    registered.remove = () => {
+      originalRemove();
+      registry.remove(toolName);
+    };
+    return registered;
   }) as typeof server.registerTool;
+
+  return { registry, gateway };
 }
 
 export function createMcpServer(
@@ -101,7 +170,8 @@ export function createMcpServer(
     }
   );
 
-  configureToolRegistration(server, workspaceRoot);
+  const harnessRuntime = configureToolRegistration(server, workspaceRoot, workspaceRoots);
+  harnessRuntimeByServer.set(server, harnessRuntime);
 
   registerFilesystemTools(server, workspaceRoot);
   registerShellTools(server, workspaceRoot, shellTimeout);

@@ -13,7 +13,18 @@ import { getUpstreamManager } from "../lib/mcp-upstream-manager.js";
 import { appendAutoMemory } from "../lib/auto-memory.js";
 import { loadPathRulesForFile } from "../lib/path-rules.js";
 import { toolResult } from "../lib/tool-result.js";
-import { loadProjectSkill, loadProjectSkills } from "../lib/skills-loader.js";
+import {
+  getSkillCodeRoot,
+  getSkillInstalledDir,
+  loadProjectSkill,
+  loadProjectSkills,
+} from "../lib/skills-loader.js";
+import { getLocalPluginsConfigPath } from "../lib/plugin-config.js";
+import {
+  installSkill,
+  setSkillEnabled,
+  uninstallSkill,
+} from "../lib/skill-installer.js";
 import {
   buildContextMap,
   selectRelevantContext,
@@ -97,7 +108,7 @@ export function registerContextTools(server: McpServer, workspaceRoot: string): 
       title: "Load Skill",
       description: "Load one skill's complete instructions. Computer Use includes its bundled guidance, API, and confirmation references.",
       inputSchema: {
-        name: z.string().min(1).describe("Exact skill name returned by list_skills"),
+        name: z.string().min(1).describe("Skill id from list_skills; its alias is also accepted"),
         max_bytes: z.number().int().positive().max(500000).optional().default(200000),
       },
       annotations: toolAnnotations("read"),
@@ -106,6 +117,82 @@ export function registerContextTools(server: McpServer, workspaceRoot: string): 
       const loaded = await loadProjectSkill(workspaceRoot, name, max_bytes);
       await audit({ tool: "load_skill", action: "read", target: loaded.skill.path, status: "ok" });
       return toolResult("load_skill", loaded);
+    }
+  );
+
+  const installerPaths = () => ({
+    localSkillsDir: getSkillInstalledDir(),
+    registryPath: getLocalPluginsConfigPath(),
+  });
+
+  server.registerTool(
+    "install_skill",
+    {
+      title: "Install Skill",
+      description:
+        "Install a local Skill package directory. The caller may clone/download a GitHub repository first; the package must contain exactly one SKILL.md. The directory is copied byte-for-byte and package scripts are never executed.",
+      inputSchema: {
+        source: z.string().min(1).describe("Absolute local directory containing one SKILL.md"),
+        id: z.string().min(1).optional().describe("Optional canonical id; defaults to the package/repository directory name"),
+        overwrite: z.boolean().optional().default(true),
+      },
+      annotations: toolAnnotations("edit"),
+    },
+    async ({ source, id, overwrite }) => {
+      const result = await installSkill({
+        source,
+        id,
+        overwrite,
+        ...installerPaths(),
+      });
+      await audit({ tool: "install_skill", action: "install", target: result.dir, status: "ok", details: { id: result.id } });
+      return toolResult("install_skill", result);
+    }
+  );
+
+  server.registerTool(
+    "uninstall_skill",
+    {
+      title: "Uninstall Skill",
+      description: "Uninstall an installed Skill by id. Built-in and project Skills cannot be removed; external registrations lose only their registry row.",
+      inputSchema: { id: z.string().min(1).describe("Canonical Skill id") },
+      annotations: toolAnnotations("edit"),
+    },
+    async ({ id }) => {
+      const result = await uninstallSkill({
+        id,
+        ...installerPaths(),
+        codeRoot: getSkillCodeRoot(),
+        workspaceRoot,
+      });
+      await audit({ tool: "uninstall_skill", action: "uninstall", target: id, status: "ok", details: result });
+      return toolResult("uninstall_skill", result);
+    }
+  );
+
+  server.registerTool(
+    "set_skill_enabled",
+    {
+      title: "Set Skill Enabled",
+      description: "Enable or disable an installed, external, or built-in Skill without deleting its files.",
+      inputSchema: {
+        id: z.string().min(1).describe("Canonical Skill id"),
+        enabled: z.boolean(),
+        source: z.enum(["installed", "external", "builtin"]).optional(),
+      },
+      annotations: toolAnnotations("edit"),
+    },
+    async ({ id, enabled, source }) => {
+      const result = await setSkillEnabled({
+        id,
+        enabled,
+        source,
+        ...installerPaths(),
+        codeRoot: getSkillCodeRoot(),
+        workspaceRoot,
+      });
+      await audit({ tool: "set_skill_enabled", action: "update", target: id, status: "ok", details: result });
+      return toolResult("set_skill_enabled", result);
     }
   );
 

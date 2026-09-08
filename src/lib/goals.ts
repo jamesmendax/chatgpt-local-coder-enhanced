@@ -6,6 +6,7 @@ import { appendHarnessEventSafe } from "./harness-events.js";
 import { appendAutoMemory } from "./auto-memory.js";
 import { inferProjectScope } from "./project-scope.js";
 import { notifyStateInvalidated } from "./state-invalidate.js";
+import { getRuntimeScope } from "./runtime-scope.js";
 
 export type GoalStatus = "active" | "paused" | "completed" | "cancelled";
 
@@ -25,6 +26,7 @@ export interface DurableGoal {
   constraints: string[];
   status: GoalStatus;
   current_phase: string;
+  owner_session?: string;
   created_at: string;
   updated_at: string;
   completed_at?: string;
@@ -33,8 +35,14 @@ export interface DurableGoal {
 export const GOAL_GROUNDING_NOTE =
   "Grounding: report only what tool results and verified evidence actually establish; mark anything unverified as unverified.";
 
+export const GOAL_WATCHDOG_POLICY =
+  "Goal watchdog = goal-scoped fallback alerting, not the execution loop. Active goal turns it on; pause/complete/cancel/no-goal turns it off; MCP exit terminates it. It never grants permission to stop and it does not auto-resume ChatGPT Web. During normal Goal execution, do not manually run watchdog start/stop/status scripts; use goal actions. Operator scripts are only for explicit user-requested control or debugging.";
+
 export const GOAL_CONTINUATION_CONTRACT =
-  "Active Goal = continuous execution. After goal(action=create) or resume, keep using tools in the same assistant turn until the goal is completed; a progress update is a checkpoint, not a stop condition. While this goal is active it SUPERSEDES any generic progress-reporting, pacing, or check-in rule (for example 'report after every few tool calls'): intermediate progress goes to task_state checkpoints, never to the user, and no user reply is expected until DELIVERABLE_READY or a verified blocker. The only permitted turn endings are: a verified blocker needing user input, approval, credentials, or a physical action (record task_state(checkpoint, blocked_reason), then yield); or completion. Never end the turn by asking permission for something you can already do (the next phase or step), by presenting a plan instead of results, or with any form of 'shall I continue?' — phases are bookkeeping, not stopping points. If the user sends a message mid-goal, answer it in the same turn and keep executing; a user reply is never a stop condition. When every criterion passes, immediately call goal(action=complete); if an active durable task exists, call task_state(action=complete), and send the final answer only after DELIVERABLE_READY.";
+  "Active Goal = continuous execution. After goal(action=create) or resume, keep using tools in the same assistant turn until completion; a progress update is a checkpoint, not a stop condition. Active Goal SUPERSEDES generic progress-reporting, pacing, and check-in rules: intermediate progress belongs in task_state, not a user reply. Yield only for a verified blocker requiring user-only input, approval, credentials, or physical action (record task_state(checkpoint, blocked_reason)); or an explicit goal pause/cancel/completion. Never ask permission for work you can already do or present a plan instead of executing it. If the user sends a message mid-goal, handle the instruction and keep executing unless they explicitly pause, cancel, or replace the goal. When every criterion passes, immediately call goal(action=complete); then complete any active durable task and reply only after DELIVERABLE_READY. The Goal watchdog is lifecycle-managed fallback alerting: active goal turns it on, pause/complete/cancel/no-goal turns it off, and MCP exit terminates it. The watchdog never grants permission to stop and does not auto-resume ChatGPT Web; during normal Goal execution do not manually run watchdog scripts — use goal actions. Operator watchdog scripts are only for explicit user-requested control or debugging.";
+
+export const GOAL_CONTINUATION_SNAPSHOT =
+  "Active Goal: continue tool calls until completion or a verified user-only blocker; progress is a checkpoint, not a stop condition. Goal actions own the watchdog lifecycle. Watchdog = fallback alert only, never permission to stop and never Web auto-resume. Do not run watchdog scripts during normal agent execution.";
 
 export type GoalMutationOptions = { expectedRevision?: number };
 
@@ -81,12 +89,20 @@ export interface GoalSummary {
   criteria_total: number;
   remaining_criteria: string[];
   constraints: string[];
+  owner_session?: string;
   execution_mode: "continuous";
   continuation_contract: string;
   execution_policy: {
     progress_messages: "checkpoint_only";
     user_reply: "until_DELIVERABLE_READY_or_verified_blocker";
     supersedes_generic_progress_rules: true;
+  };
+  watchdog_policy: {
+    mode: "goal_scoped";
+    lifecycle: "managed_by_goal";
+    role: "fallback_alert_only";
+    manual_control: "operator_only";
+    auto_resume_web: false;
   };
   updated_at: string;
 }
@@ -182,10 +198,39 @@ function normalizeGoal(raw: DurableGoal): DurableGoal {
     constraints: normalizeConstraints(raw.constraints),
     status: raw.status,
     current_phase: cleanString(raw.current_phase, 2000) || "Work toward the goal",
+    ...(raw.owner_session ? { owner_session: raw.owner_session } : {}),
     created_at: raw.created_at,
     updated_at: raw.updated_at,
     ...(raw.completed_at ? { completed_at: raw.completed_at } : {}),
   };
+}
+
+/**
+ * Session scoping: a goal created inside one ChatGPT conversation belongs to
+ * that conversation's MCP session. Signals and gates only apply to the owning
+ * session; other windows sharing this workspace are completely unaffected.
+ * A goal without owner_session (legacy/unbound, e.g. created outside a
+ * transport session) keeps the historical workspace-wide behavior.
+ */
+export function goalVisibleToSession(goal: DurableGoal, sessionId?: string): boolean {
+  return !goal.owner_session || goal.owner_session === sessionId;
+}
+
+function currentSessionId(): string | undefined {
+  return getRuntimeScope()?.mcpSessionId;
+}
+
+function assertGoalAccessibleBySession(goal: DurableGoal, sessionId?: string): void {
+  if (goal.owner_session && sessionId && goal.owner_session !== sessionId) {
+    throw new Error(
+      `This goal belongs to a different ChatGPT window (session ${goal.owner_session.slice(0, 8)}…). ` +
+      `Manage it from that window, or call goal(action=bind) in this window to adopt it.`
+    );
+  }
+}
+
+export function resolveGoalForSession(workspaceRoot: string, sessionId?: string): Promise<DurableGoal | null> {
+  return getGoal(workspaceRoot).then((goal) => (goal && goalVisibleToSession(goal, sessionId) ? goal : null));
 }
 
 export async function getGoal(workspaceRoot: string): Promise<DurableGoal | null> {
@@ -214,8 +259,17 @@ export async function createGoal(
   }
 ): Promise<DurableGoal> {
   return withGoalLock(workspaceRoot, async () => {
+    const ownerSession = currentSessionId();
     const existing = await getGoal(workspaceRoot);
     if (existing && (existing.status === "active" || existing.status === "paused")) {
+      if (existing.owner_session && ownerSession && existing.owner_session !== ownerSession) {
+        // Another ChatGPT window owns this goal: never mutate or supersede it
+        // from here — that is how the 5/9 criteria junk-drawer incident happened.
+        throw new Error(
+          `An active goal owned by ANOTHER ChatGPT window already exists (${existing.id}): "${existing.objective.slice(0, 120)}". ` +
+          `This window is unaffected by it. To take over the task, call goal(action=bind) in this window.`
+        );
+      }
       if (input.supersede) {
         // Atomic clean replacement: never append a new task's criteria onto an
         // old goal — that is how goal state becomes a junk drawer.
@@ -247,6 +301,7 @@ export async function createGoal(
       constraints: normalizeConstraints(input.constraints),
       status: "active",
       current_phase: cleanString(input.current_phase, 2000) || "Work toward the goal",
+      ...(ownerSession ? { owner_session: ownerSession } : {}),
       created_at: now,
       updated_at: now,
     };
@@ -273,6 +328,7 @@ export async function updateGoal(
     if (goal.status === "completed" || goal.status === "cancelled") {
       throw new Error(`Cannot update a ${goal.status} goal. Create a new goal instead.`);
     }
+    assertGoalAccessibleBySession(goal, currentSessionId());
     assertExpectedRevision(goal, opts);
     const next: DurableGoal = {
       ...goal,
@@ -320,6 +376,7 @@ export async function pauseGoal(workspaceRoot: string, phase?: string, opts?: Go
   return withGoalLock(workspaceRoot, async () => {
     const goal = await getGoal(workspaceRoot);
     if (!goal || goal.status !== "active") throw new Error("Only an active goal can be paused.");
+    assertGoalAccessibleBySession(goal, currentSessionId());
     assertExpectedRevision(goal, opts);
     return setGoalStatus(workspaceRoot, "paused", phase);
   });
@@ -329,6 +386,7 @@ export async function resumeGoal(workspaceRoot: string, phase?: string, opts?: G
   return withGoalLock(workspaceRoot, async () => {
     const goal = await getGoal(workspaceRoot);
     if (!goal || goal.status !== "paused") throw new Error("Only a paused goal can be resumed.");
+    assertGoalAccessibleBySession(goal, currentSessionId());
     assertExpectedRevision(goal, opts);
     return setGoalStatus(workspaceRoot, "active", phase);
   });
@@ -340,7 +398,7 @@ export async function cancelGoal(workspaceRoot: string, opts?: GoalMutationOptio
     if (!goal || (goal.status !== "active" && goal.status !== "paused")) {
       throw new Error("Only an active or paused goal can be cancelled.");
     }
-    assertExpectedRevision(goal, opts);
+    assertGoalAccessibleBySession(goal, currentSessionId());
     return setGoalStatus(workspaceRoot, "cancelled", "Cancelled");
   });
 }
@@ -350,6 +408,7 @@ export async function completeGoal(workspaceRoot: string, opts?: GoalMutationOpt
     const goal = await getGoal(workspaceRoot);
     if (!goal) throw new Error("No goal exists for this workspace.");
     if (goal.status !== "active") throw new Error(`Cannot complete a ${goal.status} goal.`);
+    assertGoalAccessibleBySession(goal, currentSessionId());
     assertExpectedRevision(goal, opts);
     const remaining = goal.success_criteria.filter((criterion) => !criterion.passed);
     if (remaining.length) {
@@ -388,14 +447,14 @@ export async function confirmGoalCriterion(
       throw new Error(`Cannot confirm criteria on a ${goal.status} goal.`);
     }
     assertExpectedRevision(goal, { expectedRevision: input.expectedRevision });
-    const nameKey = input.criterion.trim().toLowerCase();
-    const index = goal.success_criteria.findIndex((c) => c.name.toLowerCase() === nameKey);
+    const index = goal.success_criteria.findIndex((c) => criterionKey(c.name) === criterionKey(input.criterion));
     if (index < 0) throw new Error(`Unknown criterion "${input.criterion}".`);
     const criterion = goal.success_criteria[index];
     if (!criterion.requires_confirmation) {
       throw new Error(`Criterion "${criterion.name}" is not marked requires_confirmation; update it with action=update instead.`);
     }
     if (criterion.passed) throw new Error(`Criterion "${criterion.name}" is already confirmed.`);
+    assertGoalAccessibleBySession(goal, currentSessionId());
     const detail = cleanString(input.detail, 2000);
     const next: DurableGoal = {
       ...goal,
@@ -422,6 +481,37 @@ export async function confirmGoalCriterion(
   });
 }
 
+/**
+ * Cross-session adoption: a NEW ChatGPT conversation (new MCP session) binds
+ * the existing goal to itself, moving the continuation signals and gates into
+ * that window. Requires this window's session id; bumps revision. Does NOT
+ * touch any durable task.
+ */
+export async function bindGoalToSession(workspaceRoot: string, opts?: GoalMutationOptions): Promise<DurableGoal> {
+  return withGoalLock(workspaceRoot, async () => {
+    const sessionId = currentSessionId();
+    if (!sessionId) throw new Error("goal(action=bind) requires a ChatGPT session context (none available).");
+    const goal = await getGoal(workspaceRoot);
+    if (!goal || (goal.status !== "active" && goal.status !== "paused")) {
+      throw new Error("No active or paused goal to bind in this workspace.");
+    }
+    if (goal.owner_session === sessionId) {
+      throw new Error("Goal is already bound to this window.");
+    }
+    assertExpectedRevision(goal, opts);
+    const next: DurableGoal = {
+      ...goal,
+      owner_session: sessionId,
+      revision: goal.revision + 1,
+      updated_at: new Date().toISOString(),
+    };
+    await atomicWriteJson(goalPath(workspaceRoot), next);
+    notifyStateInvalidated(workspaceRoot);
+    await recordGoalChange(workspaceRoot, "bind", next);
+    return next;
+  });
+}
+
 export function goalSummary(goal: DurableGoal): GoalSummary {
   const remaining = goal.success_criteria.filter((criterion) => !criterion.passed);
   return {
@@ -433,11 +523,19 @@ export function goalSummary(goal: DurableGoal): GoalSummary {
     criteria_total: goal.success_criteria.length,
     remaining_criteria: remaining.map((criterion) => criterion.name),
     constraints: goal.constraints,
+    owner_session: goal.owner_session,
     execution_mode: "continuous",
     execution_policy: {
       progress_messages: "checkpoint_only",
       user_reply: "until_DELIVERABLE_READY_or_verified_blocker",
       supersedes_generic_progress_rules: true,
+    },
+    watchdog_policy: {
+      mode: "goal_scoped",
+      lifecycle: "managed_by_goal",
+      role: "fallback_alert_only",
+      manual_control: "operator_only",
+      auto_resume_web: false,
     },
     continuation_contract: GOAL_CONTINUATION_CONTRACT,
     updated_at: goal.updated_at,
@@ -456,18 +554,20 @@ export async function formatActiveGoalForInstructions(workspaceRoot: string): Pr
   return [
     "## ACTIVE GOAL",
     `Execution contract: ${GOAL_CONTINUATION_CONTRACT}`,
+    `Watchdog policy: ${GOAL_WATCHDOG_POLICY}`,
     `Objective: ${goal.objective}`,
     `Current phase: ${goal.current_phase}`,
     "Success criteria:",
     criteria,
     constraints,
-    "Goal rules: keep executing unless the continuation contract permits yielding.",
+    "Goal rules: keep executing unless the continuation contract permits yielding; normal agent execution must use goal actions rather than watchdog scripts.",
   ].filter(Boolean).join("\n");
 }
 
 export async function assertGoalAllowsTaskCompletion(workspaceRoot: string): Promise<void> {
+  const sessionId = getRuntimeScope()?.mcpSessionId;
   const goal = await getGoal(workspaceRoot);
-  if (!goal || goal.status !== "active") return;
+  if (!goal || goal.status !== "active" || !goalVisibleToSession(goal, sessionId)) return;
   const remaining = goal.success_criteria.filter((criterion) => !criterion.passed);
   if (remaining.length) {
     throw new Error(

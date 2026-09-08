@@ -197,9 +197,18 @@ function browserLifecycleTimeout(timeoutMs: number, multiplier = 2): number {
   return Math.min(180_000, Math.max(5_000, timeoutMs * multiplier + 5_000));
 }
 
-async function closeVisualBrowser(browser: Browser, timeoutMs: number): Promise<void> {
+function normalizeVisualError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+async function closeVisualBrowser(browser: Browser, timeoutMs: number): Promise<Error | undefined> {
   const closeTimeout = Math.min(5_000, Math.max(1_000, Math.floor(timeoutMs / 4)));
-  await withVisualDeadline("Visual browser close", closeTimeout, () => browser.close()).catch(() => undefined);
+  try {
+    await withVisualDeadline("Visual browser close", closeTimeout, () => browser.close());
+    return undefined;
+  } catch (error) {
+    return normalizeVisualError(error);
+  }
 }
 
 async function launchVisualBrowser(timeoutMs = 30_000): Promise<Browser> {
@@ -567,29 +576,63 @@ async function renderPdfPages(
   const pagePaths: string[] = [];
   const pageMap = new Map<number, string>();
   const errors: string[] = [];
+  let renderError: unknown;
   try {
     for (const pageNumber of pages) {
       const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
-      page.setDefaultTimeout(timeoutMs);
-      page.on("pageerror", (error) => errors.push(error.message.slice(0, 1000)));
-      const target = `${pathToFileURL(pdfPath).toString()}#page=${pageNumber}&zoom=page-fit`;
-      await page.goto(target, { waitUntil: "domcontentloaded", timeout: timeoutMs });
-      await page.waitForTimeout(Math.min(1400, Math.max(500, Math.floor(timeoutMs / 20))));
-      const outputPath = path.join(outputDir, `page-${String(pageNumber).padStart(3, "0")}.png`);
-      const toolbar = Math.min(64, Math.max(0, height - 100));
-      await page.screenshot({
-        path: outputPath,
-        type: "png",
-        clip: { x: 0, y: toolbar, width, height: height - toolbar },
-        animations: "disabled",
-        timeout: timeoutMs,
-      });
-      pagePaths.push(outputPath);
-      pageMap.set(pageNumber, outputPath);
-      await page.close();
+      let pageError: unknown;
+      try {
+        page.setDefaultTimeout(timeoutMs);
+        page.on("pageerror", (error) => errors.push(error.message.slice(0, 1000)));
+        const target = `${pathToFileURL(pdfPath).toString()}#page=${pageNumber}&zoom=page-fit`;
+        await page.goto(target, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+        await page.waitForLoadState("load", { timeout: Math.min(timeoutMs, 5_000) }).catch(() => undefined);
+        await page.waitForTimeout(Math.min(1400, Math.max(500, Math.floor(timeoutMs / 20))));
+        const outputPath = path.join(outputDir, `page-${String(pageNumber).padStart(3, "0")}.png`);
+        const toolbar = Math.min(64, Math.max(0, height - 100));
+        let screenshotError: unknown;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            await page.screenshot({
+              path: outputPath,
+              type: "png",
+              clip: { x: 0, y: toolbar, width, height: height - toolbar },
+              animations: "disabled",
+              timeout: timeoutMs,
+            });
+            screenshotError = undefined;
+            break;
+          } catch (error) {
+            screenshotError = error;
+            if (attempt === 3 || page.isClosed()) break;
+            await page.waitForTimeout(250 * attempt);
+          }
+        }
+        if (screenshotError) throw screenshotError;
+        pagePaths.push(outputPath);
+        pageMap.set(pageNumber, outputPath);
+      } catch (error) {
+        pageError = error;
+        throw error;
+      } finally {
+        try {
+          await page.close();
+        } catch (error) {
+          const closeError = normalizeVisualError(error);
+          errors.push(`page ${pageNumber} close: ${closeError.message.slice(0, 1000)}`);
+          if (!pageError) throw closeError;
+        }
+      }
     }
+  } catch (error) {
+    renderError = error;
+    throw error;
   } finally {
-    await closeVisualBrowser(browser, timeoutMs);
+    const closeError = await closeVisualBrowser(browser, timeoutMs);
+    if (closeError) {
+      errors.push(`browser close: ${closeError.message.slice(0, 1000)}`);
+      if (!renderError) throw closeError;
+    }
   }
   return {
     pagePaths,

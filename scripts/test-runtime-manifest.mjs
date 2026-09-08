@@ -15,7 +15,7 @@ try {
   const { getRuntimeManifest } = await import(`../dist/lib/runtime-manifest.js?test=${Date.now()}`);
   const manifest = getRuntimeManifest();
   assert.equal(manifest.tool_profile, "slim");
-  assert.equal(manifest.tool_count, 27);
+  assert.equal(manifest.tool_count, 30);
   assert.ok(manifest.tool_names.includes("visual_review"));
   assert.ok(manifest.tool_names.includes("rewind"));
   assert.ok(!manifest.tool_names.includes("open_image"));

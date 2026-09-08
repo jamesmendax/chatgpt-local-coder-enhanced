@@ -337,6 +337,7 @@ const adminServer = startAdminServer({
   mcpPort: PORT,
   pid: process.pid,
   manager: upstreamManager,
+  workspaceRoot,
   sessionCount: () => sessionManager.count(),
   instructionSummary: () => summarizeInstructionContext(instructionContext),
   instructionsPreview: () => instructionContext.instructionsText,

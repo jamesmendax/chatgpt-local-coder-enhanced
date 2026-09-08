@@ -78,6 +78,114 @@ await run("jsonSchemaToZodShape respects required fields", async () => {
   if (!bParsed.success) throw new Error("b should be optional");
 });
 
+await run("jsonSchemaToZodShape preserves union types", async () => {
+  const shape = jsonSchemaToZodShape({
+    type: "object",
+    properties: { value: { type: ["string", "number", "null"] } },
+    required: ["value"],
+  });
+  if (!shape.value.safeParse("text").success) throw new Error("string branch rejected");
+  if (!shape.value.safeParse(42).success) throw new Error("number branch rejected");
+  if (!shape.value.safeParse(null).success) throw new Error("null branch rejected");
+  if (shape.value.safeParse(true).success) throw new Error("undeclared boolean branch accepted");
+});
+
+await run("proxy refresh applies policy on discovery failure, refreshes metadata, and hands over owners", async () => {
+  const registered = new Map();
+  const fakeServer = {
+    registerTool(name, config, callback) {
+      if (registered.has(name)) throw new Error(`duplicate registration: ${name}`);
+      const handle = {
+        config,
+        callback,
+        remove() {
+          if (registered.get(name) === handle) registered.delete(name);
+        },
+      };
+      registered.set(name, handle);
+      return handle;
+    },
+  };
+
+  let configs = [
+    { id: "a", name: "A", enabled: true, expose: "all", tool_prefix: "shared" },
+    { id: "b", name: "B", enabled: true, expose: "all", tool_prefix: "shared" },
+  ];
+  const discoveries = new Map([
+    ["a", [{ name: "run", description: "version one", inputSchema: { type: "object", properties: {} } }]],
+    ["b", [{ name: "run", description: "from B", inputSchema: { type: "object", properties: {} } }]],
+  ]);
+  const calls = [];
+  const fakeManager = {
+    listServerConfigs: () => configs,
+    async listTools(id) {
+      const value = discoveries.get(id);
+      if (value instanceof Error) throw value;
+      return value ?? [];
+    },
+    async callTool(id, tool, args) {
+      calls.push({ id, tool, args });
+      return { content: [{ type: "text", text: id }] };
+    },
+  };
+
+  await refreshProxiedTools(fakeServer, fakeManager);
+  const first = registered.get("shared__run");
+  if (!first?.config.description.includes("version one")) throw new Error("initial owner metadata missing");
+
+  discoveries.set("a", [{ name: "run", description: "version two", inputSchema: { type: "object", properties: {} } }]);
+  await refreshProxiedTools(fakeServer, fakeManager);
+  const refreshed = registered.get("shared__run");
+  if (refreshed === first || !refreshed?.config.description.includes("version two")) {
+    throw new Error("same-owner metadata remained stale");
+  }
+
+  configs = [{ ...configs[0], disabled_tools: ["run"] }, configs[1]];
+  discoveries.set("a", new Error("discovery unavailable"));
+  await refreshProxiedTools(fakeServer, fakeManager);
+  const handedOver = registered.get("shared__run");
+  if (!handedOver?.config.description.includes("from B")) {
+    throw new Error("disabled failed owner blocked the available replacement owner");
+  }
+  await handedOver.callback({ payload: true });
+  if (calls.at(-1)?.id !== "b") throw new Error(`expected owner B call, got ${JSON.stringify(calls.at(-1))}`);
+
+  configs = [configs[0]];
+  await refreshProxiedTools(fakeServer, fakeManager);
+  if (registered.has("shared__run")) throw new Error("disabled tool survived failed discovery");
+});
+
+await run("shutdown invalidates pending upstream connections", async () => {
+  const manager = new McpUpstreamManager(configPath);
+  manager.config = {
+    version: 1,
+    servers: [{ id: "slow", name: "Slow", enabled: true, transport: "http", url: "http://invalid/mcp", expose: "all" }],
+  };
+  let release;
+  let closeCount = 0;
+  const started = new Promise((resolve) => { release = resolve; });
+  manager.createTransport = async () => {
+    await started;
+    return {
+      client: { listTools: async () => ({ tools: [] }) },
+      transport: { close: async () => { closeCount++; } },
+      pid: null,
+    };
+  };
+  const pending = manager.connect("slow").catch((error) => error);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const shutdown = manager.shutdown();
+  release();
+  const outcome = await pending;
+  await shutdown;
+  if (!(outcome instanceof Error) || !outcome.message.includes("superseded")) {
+    throw new Error(`pending connection was not invalidated: ${String(outcome)}`);
+  }
+  if (manager.connections.size !== 0 || closeCount === 0) {
+    throw new Error(`connection resurrected after shutdown: connections=${manager.connections.size} closes=${closeCount}`);
+  }
+});
+
 await run("save and load upstream config", async () => {
   await saveUpstreamConfig(
     {
