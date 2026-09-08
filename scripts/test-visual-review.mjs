@@ -59,14 +59,59 @@ function imageBlocks(result) {
   return (result.content || []).filter((block) => block.type === "image");
 }
 
+const strongQualityScores = {
+  task_fidelity: 4.5,
+  composition: 4.25,
+  visual_hierarchy: 4.25,
+  coherence: 4.5,
+  craft_precision: 4.25,
+  professional_readiness: 4.25,
+};
+
+async function critiqueReview(reviewId, options = {}) {
+  const worthwhile = options.worthwhile === true;
+  return data(await client.callTool({
+    name: "visual_review",
+    arguments: {
+      action: "critique",
+      review_id: reviewId,
+      inspected_full_render: true,
+      first_impression: options.firstImpression || "polished",
+      delivery_recommendation: options.recommendation || "accept",
+      quality_scores: options.scores || strongQualityScores,
+      critical_issues: options.criticalIssues || [],
+      major_issues: options.majorIssues || [],
+      minor_issues: options.minorIssues || [],
+      strengths: options.strengths || ["The rendered artifact is coherent and presentation-ready at the locked quality bar."],
+      improvement_opportunities: worthwhile
+        ? (options.improvementOpportunities || ["One concrete, high-value visual refinement remains worthwhile."])
+        : [],
+      further_improvement_worthwhile: worthwhile,
+      assessment_summary: options.summary || "External-reviewer Critic inspected the real rendered pixels independently of creator effort.",
+    },
+  }));
+}
+
 try {
   const listed = await client.listTools();
   const names = new Set(listed.tools.map((tool) => tool.name));
   if (!names.has("visual_review")) throw new Error("visual_review missing from slim");
   const visualTool = listed.tools.find((tool) => tool.name === "visual_review");
   const visualProperties = visualTool?.inputSchema?.properties || {};
-  for (const field of ["comparison", "strengths", "improvement_opportunities", "further_improvement_worthwhile"]) {
-    if (!(field in visualProperties)) throw new Error(`visual_review V3 schema field missing: ${field}`);
+  for (const field of [
+    "quality_bar",
+    "first_impression",
+    "delivery_recommendation",
+    "quality_scores",
+    "critical_issues",
+    "major_issues",
+    "minor_issues",
+    "comparison",
+    "strengths",
+    "improvement_opportunities",
+    "further_improvement_worthwhile",
+  ]) {
+    if (!(field in visualProperties)) throw new Error(`visual_review universal quality schema field missing: ${field}`);
   }
   if (names.has("open_image") || names.has("render_svg") || names.has("capture_webpage")) {
     throw new Error("legacy visual primitives should stay hidden in slim");
@@ -96,6 +141,59 @@ try {
     arguments: { action: "status", review_id: first.review_id },
   }));
   if (!fresh.fresh || !fresh.verifiable || !fresh.machine_ready || fresh.model_visual_ready || fresh.model_visual_status !== "pending") throw new Error("fresh review status invalid");
+
+  // Draft is intentionally lenient: a major issue with recommendation=revise
+  // remains non-contradictory at the draft bar. The first Critic write must
+  // still win deterministically when two callers race on one review_id.
+  const draftReview = data(await client.callTool({
+    name: "visual_review",
+    arguments: { target: svgPath, quality_bar: "draft", width: 640, height: 400 },
+  }));
+  const draftCritiqueArguments = {
+    action: "critique",
+    review_id: draftReview.review_id,
+    inspected_full_render: true,
+    first_impression: "rough",
+    delivery_recommendation: "revise",
+    quality_scores: {
+      task_fidelity: 3,
+      composition: 3,
+      visual_hierarchy: 3,
+      coherence: 3,
+      craft_precision: 3,
+      professional_readiness: 3,
+    },
+    major_issues: ["A draft still needs a major composition refinement."],
+    strengths: ["The exploratory structure is visible."],
+    further_improvement_worthwhile: false,
+  };
+  const concurrentDraftCritiques = await Promise.all([
+    client.callTool({ name: "visual_review", arguments: draftCritiqueArguments }),
+    client.callTool({ name: "visual_review", arguments: draftCritiqueArguments }),
+  ]);
+  const successfulDraftCritiques = concurrentDraftCritiques.filter((result) => result.structuredContent?.ok === true);
+  const rejectedDraftCritiques = concurrentDraftCritiques.filter((result) => result.structuredContent?.ok === false);
+  if (successfulDraftCritiques.length !== 1 || rejectedDraftCritiques.length !== 1 || !JSON.stringify(rejectedDraftCritiques[0]).includes("Critic decision is immutable")) {
+    throw new Error("concurrent Critic writes were not serialized with immutable first-writer semantics");
+  }
+  const draftCritiqueData = successfulDraftCritiques[0].structuredContent.data;
+  if (draftCritiqueData.model_visual_quality_gate.status !== "acceptable") {
+    throw new Error("draft quality bar incorrectly rejected a major issue with recommendation=revise");
+  }
+  const draftAssessment = data(await client.callTool({
+    name: "visual_review",
+    arguments: {
+      action: "assess",
+      review_id: draftReview.review_id,
+      verdict: "pass",
+      inspected_full_render: true,
+      further_improvement_worthwhile: false,
+      assessment_summary: "Draft gate regression: exploratory work may retain a major issue when it is not recommended for acceptance.",
+    },
+  }));
+  if (!draftAssessment.model_visual_ready || !draftAssessment.model_visual_iteration_ready) {
+    throw new Error("draft review did not expose server-calculated ready evidence after a valid assessment");
+  }
 
   const html = await client.callTool({
     name: "visual_review",
@@ -134,7 +232,111 @@ try {
   }
 
   const imageReview = await client.callTool({ name: "visual_review", arguments: { target: pngPath, width: 640, height: 400 } });
-  if (data(imageReview).kind !== "image" || imageBlocks(imageReview).length !== 1) throw new Error("image review failed");
+  const imageReviewData = data(imageReview);
+  if (imageReviewData.kind !== "image" || imageBlocks(imageReview).length !== 1) throw new Error("image review failed");
+
+  const selfReportedPassWithoutCritic = await client.callTool({
+    name: "visual_review",
+    arguments: {
+      action: "assess",
+      review_id: imageReviewData.review_id,
+      verdict: "pass",
+      inspected_full_render: true,
+      further_improvement_worthwhile: false,
+    },
+  });
+  if (
+    selfReportedPassWithoutCritic.structuredContent?.ok !== false ||
+    !JSON.stringify(selfReportedPassWithoutCritic).includes("VISUAL_CRITIQUE_REQUIRED")
+  ) {
+    throw new Error("creator self-reported PASS was accepted without an independent Critic phase");
+  }
+
+  const lowQualityCritique = await critiqueReview(imageReviewData.review_id, {
+    firstImpression: "rough",
+    recommendation: "revise",
+    scores: {
+      task_fidelity: 3,
+      composition: 2.25,
+      visual_hierarchy: 2,
+      coherence: 2.5,
+      craft_precision: 1.75,
+      professional_readiness: 1.5,
+    },
+    majorIssues: ["The artifact is visibly rough and not ready to be handed to a user as a finished result."],
+    worthwhile: true,
+    improvementOpportunities: ["Rework the visible composition and craft to reach a presentable finished-product standard."],
+    summary: "Negative benchmark: recognizable/renderable does not imply acceptable visual quality.",
+  });
+  if (lowQualityCritique.model_visual_quality_gate.status !== "failed") {
+    throw new Error("low-quality Critic benchmark was not rejected by the server quality gate");
+  }
+  const reCritiqueSamePixels = await client.callTool({
+    name: "visual_review",
+    arguments: {
+      action: "critique",
+      review_id: imageReviewData.review_id,
+      inspected_full_render: true,
+      first_impression: "polished",
+      delivery_recommendation: "accept",
+      quality_scores: strongQualityScores,
+      critical_issues: [],
+      major_issues: [],
+      minor_issues: [],
+      strengths: ["Attempted post-hoc self-approval."],
+      improvement_opportunities: [],
+      further_improvement_worthwhile: false,
+    },
+  });
+  if (
+    reCritiqueSamePixels.structuredContent?.ok !== false ||
+    !JSON.stringify(reCritiqueSamePixels).includes("Critic decision is immutable")
+  ) {
+    throw new Error("creator could overwrite a low-quality Critic decision on the same pixels");
+  }
+  const lowQualitySemanticPass = data(await client.callTool({
+    name: "visual_review",
+    arguments: {
+      action: "assess",
+      review_id: imageReviewData.review_id,
+      verdict: "pass",
+      inspected_full_render: true,
+      improvement_opportunities: ["Rework the visible composition and craft to reach a presentable finished-product standard."],
+      further_improvement_worthwhile: true,
+      assessment_summary: "Semantically recognizable, but the Critic quality gate remains authoritative.",
+    },
+  }));
+  if (
+    lowQualitySemanticPass.model_visual_semantic_status !== "pass" ||
+    lowQualitySemanticPass.model_visual_quality_status !== "failed" ||
+    lowQualitySemanticPass.model_visual_iteration_ready
+  ) {
+    throw new Error("semantic PASS incorrectly overrode a failed finished-product visual quality gate");
+  }
+
+  const contradictoryCritique = await client.callTool({
+    name: "visual_review",
+    arguments: {
+      action: "critique",
+      review_id: htmlData.review_id,
+      inspected_full_render: true,
+      first_impression: "acceptable",
+      delivery_recommendation: "accept",
+      quality_scores: strongQualityScores,
+      critical_issues: [],
+      major_issues: [],
+      minor_issues: [],
+      strengths: ["The page renders correctly."],
+      improvement_opportunities: ["A clearly worthwhile improvement still remains."],
+      further_improvement_worthwhile: false,
+    },
+  });
+  if (
+    contradictoryCritique.structuredContent?.ok !== false ||
+    !JSON.stringify(contradictoryCritique).includes("VISUAL_CRITIQUE_CONTRADICTION")
+  ) {
+    throw new Error("contradictory Critic assessment did not fail closed");
+  }
 
   const browserPath = findVisualBrowserExecutable();
   if (!browserPath) throw new Error("test requires installed Edge/Chrome/Chromium");
@@ -160,6 +362,8 @@ try {
     name: "visual_review",
     arguments: { target: svgPath, width: 640, height: 400 },
   }));
+  const taskCritique = await critiqueReview(taskReview.review_id);
+  if (taskCritique.model_visual_quality_gate.status !== "acceptable") throw new Error("normal high-quality Critic path did not clear the server quality gate");
   await client.callTool({
     name: "visual_review",
     arguments: {
@@ -235,6 +439,10 @@ try {
     name: "visual_review",
     arguments: { target: svgPath, width: 640, height: 400, compare_to: finalReview.review_id, max_images: 3 },
   }));
+  await critiqueReview(improvableReview.review_id, {
+    worthwhile: true,
+    improvementOpportunities: ["One more deliberate visual refinement remains worthwhile."],
+  });
   const improvableAssessment = data(await client.callTool({
     name: "visual_review",
     arguments: {
@@ -286,6 +494,10 @@ try {
     name: "visual_review",
     arguments: { target: svgPath, width: 640, height: 400, compare_to: improvableReview.review_id, max_images: 3 },
   }));
+  await critiqueReview(passedReview.review_id, {
+    worthwhile: true,
+    improvementOpportunities: ["A final bounded refinement remains worthwhile before the hard cap."],
+  });
   const passedAssessment = data(await client.callTool({
     name: "visual_review",
     arguments: {
@@ -319,6 +531,10 @@ try {
     name: "visual_review",
     arguments: { target: svgPath, width: 640, height: 400, compare_to: passedReview.review_id, max_images: 3 },
   }));
+  await critiqueReview(cappedReview.review_id, {
+    worthwhile: true,
+    improvementOpportunities: ["A theoretical sixth polish could exist, but autonomous refinement must stop at the configured cap."],
+  });
   const cappedAssessment = data(await client.callTool({
     name: "visual_review",
     arguments: {
@@ -356,10 +572,11 @@ try {
   } finally {
     await multiPageBrowser.close();
   }
-  const batchOne = data(await client.callTool({ name: "visual_review", arguments: { target: multiPagePath, width: 900, height: 1000, max_images: 12 } }));
+  const batchOne = data(await client.callTool({ name: "visual_review", arguments: { target: multiPagePath, width: 900, height: 1000, max_images: 12, timeout_ms: 90_000 } }));
   if (batchOne.page_count < 14 || batchOne.delivered_pages.length !== 12 || batchOne.delivered_pages[0] !== 1 || batchOne.delivered_pages[11] !== 12) {
     throw new Error(`paged visual review did not return the first consecutive batch: ${JSON.stringify(batchOne.delivered_pages)}`);
   }
+  await critiqueReview(batchOne.review_id);
   const batchOneAssessment = data(await client.callTool({
     name: "visual_review",
     arguments: { action: "assess", review_id: batchOne.review_id, verdict: "pass", inspected_full_render: true, further_improvement_worthwhile: false, assessment_summary: "Inspected all first-batch page images." },
@@ -367,7 +584,8 @@ try {
   if (batchOneAssessment.model_visual_coverage.complete || !batchOneAssessment.model_visual_coverage.missing_pages.includes(13)) {
     throw new Error("partial multi-page visual coverage was incorrectly marked complete");
   }
-  const batchTwo = data(await client.callTool({ name: "visual_review", arguments: { target: multiPagePath, pages: [13, 14], width: 900, height: 1000, max_images: 12 } }));
+  const batchTwo = data(await client.callTool({ name: "visual_review", arguments: { target: multiPagePath, pages: [13, 14], width: 900, height: 1000, max_images: 12, timeout_ms: 90_000 } }));
+  await critiqueReview(batchTwo.review_id);
   const batchTwoAssessment = data(await client.callTool({
     name: "visual_review",
     arguments: { action: "assess", review_id: batchTwo.review_id, verdict: "pass", inspected_full_render: true, further_improvement_worthwhile: false, assessment_summary: "Inspected the remaining full page images." },

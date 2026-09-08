@@ -74,6 +74,8 @@
                 <dt>Tunnel ID</dt><dd id="tunnel-id">—</dd>
                 <dt>本地端口</dt><dd id="tunnel-port">—</dd>
                 <dt>readyz</dt><dd id="tunnel-ready">—</dd>
+                <dt>云端轮询</dt><dd id="tunnel-cloud">—</dd>
+                <dt>OpenAI 路由</dt><dd id="tunnel-route">—</dd>
                 <dt>工作区</dt><dd id="tunnel-workspace">—</dd>
               </dl>
               <div class="card-actions">
@@ -238,6 +240,15 @@
                       </select>
                     </label>
                   </div>
+                  <div class="grid">
+                    <label><span>Tunnel 出站代理</span><select id="f-tunnel-proxy-mode">
+                      <option value="auto">自动（环境变量 → 系统代理/PAC）</option>
+                      <option value="direct">直连（不使用代理）</option>
+                      <option value="custom">自定义代理</option>
+                    </select></label>
+                    <label><span>自定义代理地址（不含用户名/密码）</span><input id="f-tunnel-proxy-url" type="text" placeholder="http://127.0.0.1:7890" spellcheck="false" disabled /></label>
+                  </div>
+                  <p class="muted small">仅 OpenAI 控制平面使用代理，本地 MCP 始终直连。保存后停止并重新启动 Tunnel 生效；不会修改 Windows 全局代理。</p>
                   <label class="check"><input id="f-auto-start" type="checkbox" /> 打开启动器时自动启动服务</label>
                   <label class="check"><input id="f-tray" type="checkbox" /> 服务运行时关闭窗口最小化到托盘</label>
                   <label class="check"><input id="f-skip-doctor" type="checkbox" /> 跳过在线校验（tunnel-client doctor）</label>

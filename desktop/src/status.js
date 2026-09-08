@@ -1,39 +1,16 @@
 "use strict";
 // 运行状态探测：MCP /health、Tunnel /readyz、端口占用者及其命令行（用于识别外部进程）。
-const http = require("http");
 const { spawnSync } = require("child_process");
-
-function getJson(url, timeoutMs = 2000) {
-  return new Promise((resolve) => {
-    const req = http.get(url, { timeout: timeoutMs }, (res) => {
-      let body = "";
-      res.setEncoding("utf8");
-      res.on("data", (c) => (body += c));
-      res.on("end", () => {
-        try {
-          resolve({ status: res.statusCode, json: JSON.parse(body), text: body });
-        } catch {
-          resolve({ status: res.statusCode, json: null, text: body });
-        }
-      });
-    });
-    req.on("timeout", () => { req.destroy(); resolve(null); });
-    req.on("error", () => resolve(null));
-  });
-}
+const { probeTunnel, readLoopback } = require("./tunnel-health");
 
 async function probeMcp(port) {
-  const res = await getJson(`http://127.0.0.1:${port}/health`);
-  if (!res || res.status !== 200 || !res.json || res.json.name !== "codex-mcp-server") return null;
-  return res.json;
+  const res = await readLoopback(port, "/health", { maxBytes: 256 * 1024 });
+  if (res.error || res.status !== 200) return null;
+  try {
+    const health = JSON.parse(res.text);
+    return health && health.name === "codex-mcp-server" ? health : null;
+  } catch { return null; }
 }
-
-async function probeTunnel(port) {
-  const res = await getJson(`http://127.0.0.1:${port}/readyz`);
-  if (!res) return { reachable: false, ready: false };
-  return { reachable: true, ready: res.status === 200 && /ready/i.test(res.text || "") };
-}
-
 /** 返回监听该端口的 PID 列表（netstat 解析）。 */
 function listeningPids(port) {
   try {

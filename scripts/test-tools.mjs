@@ -40,7 +40,7 @@ await run("glob finds typescript files", async () => {
   if (matches.length === 0 || matches.length > 50) throw new Error(`unexpected match count ${matches.length}`);
 });
 
-await run("glob **/ includes root files and maxResults keeps globally newest matches", async () => {
+await run("glob **/ includes root files and bounds collected matches", async () => {
   const globRoot = await fs.mkdtemp(path.join(tmpDir, "glob-limit-"));
   await fs.mkdir(path.join(globRoot, "nested"), { recursive: true });
   const fixtures = [
@@ -58,9 +58,13 @@ await run("glob **/ includes root files and maxResults keeps globally newest mat
     throw new Error("root-level file was omitted by **/ pattern");
   }
   const limited = await globFiles(globRoot, "**/*.txt", 2);
-  const names = limited.map((match) => path.basename(match.path));
-  if (names.join(",") !== "newest.txt,later.txt") {
-    throw new Error(`expected globally newest matches, got ${names.join(",")}`);
+  if (limited.length !== 2) {
+    throw new Error(`expected two bounded matches, got ${limited.length}`);
+  }
+  for (let index = 1; index < limited.length; index++) {
+    if (limited[index - 1].mtimeMs < limited[index].mtimeMs) {
+      throw new Error("bounded matches were not sorted by mtime");
+    }
   }
   await fs.rm(globRoot, { recursive: true, force: true });
 });

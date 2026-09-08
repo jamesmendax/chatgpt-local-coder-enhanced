@@ -113,7 +113,7 @@ async function main() {
   const previousMcpApiKey = process.env.MCP_API_KEY;
   process.env.MCP_TOKEN = "smoke-mcp-token";
   process.env.MCP_API_KEY = "smoke-mcp-api-key";
-  const tunnelSpec = harness.tunnelSpawnSpec(reloaded, "smoke-tunnel-api-key", "doctor");
+  const tunnelSpec = await harness.tunnelSpawnSpec(reloaded, "smoke-tunnel-api-key", "doctor");
   check(
     "Tunnel 子进程不继承 Admin/MCP secrets",
     !("ADMIN_TOKEN" in tunnelSpec.env) && !("MCP_TOKEN" in tunnelSpec.env) && !("MCP_API_KEY" in tunnelSpec.env) &&

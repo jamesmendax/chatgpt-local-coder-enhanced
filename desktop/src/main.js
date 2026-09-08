@@ -6,6 +6,7 @@ const crypto = require("crypto");
 
 const paths = require("./paths");
 const configStore = require("./config");
+const { validateProxyUrl, validateProxySettings } = require("./tunnel-proxy");
 const legacy = require("./legacy");
 const { Services } = require("./services");
 const { ActivityFeeds } = require("./feeds");
@@ -570,6 +571,9 @@ function applyConfigPayload(cfg, payload) {
       cfg[key] = Number(payload[key]);
     }
   }
+  if (typeof payload.tunnelProxyMode === "string") cfg.tunnelProxyMode = payload.tunnelProxyMode;
+  if (typeof payload.tunnelProxyUrl === "string") cfg.tunnelProxyUrl = payload.tunnelProxyUrl.trim() ? validateProxyUrl(payload.tunnelProxyUrl) : "";
+  validateProxySettings(cfg);
   if (payload.toolProfile === "slim" || payload.toolProfile === "full") cfg.toolProfile = payload.toolProfile;
   if (typeof payload.autoStart === "boolean") cfg.autoStart = payload.autoStart;
   if (typeof payload.minimizeToTray === "boolean") cfg.minimizeToTray = payload.minimizeToTray;

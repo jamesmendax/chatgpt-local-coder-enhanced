@@ -7,6 +7,11 @@ import {
   type RuntimeScope,
   type RuntimeScopeSeed,
 } from "./runtime-scope.js";
+import {
+  conversationSessionIdFromHeaders,
+  conversationSessionIdFromMeta,
+  getMcpRequestIdentity,
+} from "./mcp-request-identity.js";
 import type {
   EffectiveToolDefinition,
   EffectiveToolRegistry,
@@ -181,7 +186,16 @@ function findRequestContext(callbackArgs: readonly unknown[]): RequestContext | 
   if (!isRequestContextLike(candidate)) return undefined;
 
   return {
-    sessionId: typeof candidate.sessionId === "string" ? candidate.sessionId : undefined,
+    // OpenAI tunnel command dispatch can create a fresh transport-level MCP
+    // session for every tool call while keeping one stable workflow request
+    // id for the ChatGPT turn/workflow. Goal/task ownership must follow that
+    // stable workflow identity rather than the ephemeral transport session.
+    // Fall back to the SDK sessionId for ordinary MCP clients.
+    sessionId:
+      conversationSessionIdFromMeta(candidate._meta) ??
+      conversationSessionIdFromHeaders(candidate.requestInfo?.headers) ??
+      getMcpRequestIdentity()?.conversationSessionId ??
+      (typeof candidate.sessionId === "string" ? candidate.sessionId : undefined),
     signal: candidate.signal as AbortSignal | undefined,
     requestId: isRequestId(candidate.requestId) ? candidate.requestId : undefined,
   };
@@ -191,6 +205,8 @@ function isRequestContextLike(value: unknown): value is {
   sessionId?: unknown;
   signal?: unknown;
   requestId?: unknown;
+  _meta?: unknown;
+  requestInfo?: { headers?: Record<string, string | string[] | undefined> };
 } {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;

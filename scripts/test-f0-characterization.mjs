@@ -259,6 +259,16 @@ function assertActiveGoalTail(result, label) {
   assert.equal(last.text.includes("MUST_CONTINUE_TO_TOOL"), true, `${label} missing continuation marker`);
 }
 
+function assertGoalFinishTail(result, label) {
+  const texts = textEntries(result);
+  assert.ok(texts.length > 0, `${label} has no text entries`);
+  const last = texts.at(-1);
+  assert.equal(result.content.at(-1), last, `${label} finish tail is not the final content entry`);
+  assert.match(last.text, /^GOAL \d+\/\d+ — ALL CRITERIA CONFIRMED\./, `${label} lost the confirmed marker`);
+  assert.equal(last.text.includes("goal(action=complete)"), true, `${label} missing explicit finalization`);
+  assert.equal(last.text.includes("MUST_CONTINUE_TO_TOOL"), false, `${label} retained the work-phase continue lock`);
+}
+
 function resultPayload(result) {
   assert.ok(result.structuredContent && typeof result.structuredContent === "object", "missing structuredContent");
   return result.structuredContent;
@@ -438,11 +448,44 @@ async function main(createMcpServer, McpUpstreamManager, refreshProxiedTools, st
       name: "goal",
       arguments: {
         action: "update",
+        current_phase: "Verify F0 criterion",
+      },
+    });
+    assert.equal(resultPayload(updatedGoal).data.goal.success_criteria[0].passed, false);
+    assertActiveGoalTail(updatedGoal, "all-passed active Goal result");
+
+    const bypass = await goalServer.client.callTool({
+      name: "goal",
+      arguments: {
+        action: "update",
         success_criteria: [{ name: "F0 criterion", passed: true }],
       },
     });
-    assert.equal(resultPayload(updatedGoal).data.goal.success_criteria[0].passed, true);
-    assertActiveGoalTail(updatedGoal, "all-passed active Goal result");
+    assert.equal(bypass.structuredContent?.ok, false);
+    assert.match(JSON.stringify(bypass.structuredContent), /UNVERIFIED_CRITERION_UPDATE/);
+
+    const evidenceResult = await goalServer.client.callTool({
+      name: "run_command",
+      arguments: {
+        command: "node -e \"process.exit(0)\"",
+        working_directory: goalWorkspace,
+      },
+    });
+    const evidencePayload = resultPayload(evidenceResult);
+    const evidenceId = evidencePayload.data.goal_run_evidence?.id;
+    assert.ok(evidenceId);
+    assert.equal(evidencePayload.data.goal_run_evidence.verifies_criterion, true);
+
+    const confirmedGoal = await goalServer.client.callTool({
+      name: "goal",
+      arguments: {
+        action: "confirm",
+        criterion: "F0 criterion",
+        evidence_ids: [evidenceId],
+      },
+    });
+    assert.equal(resultPayload(confirmedGoal).data.goal.success_criteria[0].passed, true);
+    assertGoalFinishTail(confirmedGoal, "all-passed active Goal result");
 
     const completedGoal = await goalServer.client.callTool({
       name: "goal",

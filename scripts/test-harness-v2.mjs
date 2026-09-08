@@ -32,6 +32,7 @@ const {
   HARNESS_LOG_VERSION,
 } = await import("../dist/lib/harness-events.js");
 const { buildHarnessRuntimeContext, appendHarnessRuntimeContextToResult, resetHarnessSnapshotRetention, formatHarnessRuntimeContext } = await import("../dist/lib/context-broker.js");
+const { ensureGoalRunAuthority } = await import("../dist/lib/goal-run-web.js");
 
 try {
   const parsed = extractAbsolutePathsFromText(`修改 ${projectA} 然后继续说明，不要把后面的文字吞进路径`);
@@ -55,6 +56,7 @@ try {
     success_criteria: [{ name: "fixture passes", passed: false }],
     current_phase: "Inspect project scope",
   });
+  await ensureGoalRunAuthority(workspace, goal);
   const task = await createDurableTask(workspace, {
     goal: `Work only inside ${projectA}`,
     current_step: "Run focused checks",

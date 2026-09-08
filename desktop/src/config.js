@@ -16,6 +16,8 @@ const DEFAULTS = Object.freeze({
   mcpPort: 3000,
   adminPort: 3001,
   tunnelPort: 8080,
+  tunnelProxyMode: "auto",
+  tunnelProxyUrl: "",
   toolProfile: "slim",
   autoStart: false,
   minimizeToTray: true,

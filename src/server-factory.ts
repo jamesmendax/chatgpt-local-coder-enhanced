@@ -15,9 +15,8 @@ import { registerGoalTool } from "./tools/goal.js";
 import { registerBrowserTools } from "./tools/browser.js";
 import { buildServerInstructions } from "./lib/quickstart.js";
 import type { McpUpstreamManager } from "./lib/mcp-upstream-manager.js";
-import { recordGoalStallTelemetry, recordToolObservation } from "./lib/durable-tasks.js";
-import { appendHarnessRuntimeContextToResult, resetHarnessSnapshotRetention } from "./lib/context-broker.js";
-import { appendRepeatGuardReminderToResult, recordRepeatGuardFailure } from "./lib/repeat-guard.js";
+import { resetHarnessSnapshotRetention } from "./lib/context-broker.js";
+import { createWebHarnessResultPipeline } from "./lib/result-pipeline.js";
 import {
   EffectiveToolRegistry,
   type EffectiveToolConfig,
@@ -53,7 +52,7 @@ function traceInvocation(record: InvocationTraceRecord): void {
   const mode = (process.env.HARNESS_INVOCATION_TRACE || "off").trim().toLowerCase();
   if (mode !== "1" && mode !== "true" && mode !== "all") return;
   const safe = (value: string | number | undefined): string =>
-    String(value ?? "-").replace(/[\r\n\t]/g, " ").slice(0, 160);
+    String(value ?? "-").replace(/[\r\n\t\u2028\u2029]/g, " ").slice(0, 160);
   const fields = [
     `status=${record.status}`,
     `invocation=${record.invocationId}`,
@@ -78,6 +77,7 @@ function configureToolRegistration(
 ): McpServerHarnessRuntime {
   const registry = new EffectiveToolRegistry();
   const tunnelProfile = process.env.CHATGPT_TUNNEL_PROFILE?.trim() || undefined;
+  const resultPipeline = createWebHarnessResultPipeline(workspaceRoot);
   const gateway = new InvocationGateway(
     registry,
     {
@@ -86,29 +86,8 @@ function configureToolRegistration(
       tunnelProfile,
     },
     {
-      onSuccess: async (context, result) => {
-        const toolName = context.definition.name;
-        await recordToolObservation(workspaceRoot, toolName, context.rawArgs, result).catch(() => undefined);
-        await recordGoalStallTelemetry(workspaceRoot).catch(() => undefined);
-        const withHarnessContext = await appendHarnessRuntimeContextToResult(workspaceRoot, result, { toolName });
-        return appendRepeatGuardReminderToResult(
-          workspaceRoot,
-          toolName,
-          context.rawArgs,
-          withHarnessContext
-        ) as typeof result;
-      },
-      onFailure: async (context, error) => {
-        const toolName = context.definition.name;
-        await recordToolObservation(
-          workspaceRoot,
-          toolName,
-          context.rawArgs,
-          undefined,
-          error
-        ).catch(() => undefined);
-        recordRepeatGuardFailure(workspaceRoot, toolName, context.rawArgs);
-      },
+      onSuccess: (context, result) => resultPipeline.processSuccess(context, result),
+      onFailure: (context, error) => resultPipeline.processFailure(context, error),
       trace: traceInvocation,
     }
   );

@@ -41,6 +41,24 @@ async function run(name, fn) {
   }
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitUntil(predicate, timeoutMs = 1000) {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start >= timeoutMs) throw new Error("timed out waiting for condition");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 function spawnMockHttp(port) {
   return spawn(process.execPath, [path.join(root, "scripts/mock-http-mcp.mjs")], {
     env: { ...process.env, MOCK_HTTP_MCP_PORT: String(port) },
@@ -65,6 +83,64 @@ await fs.mkdir(tmpDir, { recursive: true });
 
 const configPath = path.join(tmpDir, "upstream.json");
 process.env.MCP_UPSTREAM_CONFIG = configPath;
+
+await run("overlapping reload and update serialize config mutation and generation", async () => {
+  const serializedPath = path.join(tmpDir, "serialized-upstream.json");
+  const configFor = (id) => ({
+    version: 1,
+    servers: [
+      {
+        id,
+        name: id,
+        enabled: true,
+        transport: "http",
+        url: `http://127.0.0.1/${id}`,
+        expose: "all",
+      },
+    ],
+  });
+  await saveUpstreamConfig(configFor("initial"), serializedPath);
+  const manager = new McpUpstreamManager(serializedPath);
+  await manager.init();
+  await saveUpstreamConfig(configFor("reloaded"), serializedPath);
+
+  const refreshStarted = deferred();
+  const releaseRefresh = deferred();
+  const refreshSnapshots = [];
+  manager.shutdown = async () => {};
+  manager.refreshAllProxies = async () => {
+    refreshSnapshots.push(manager.getConfig().servers[0]?.id);
+    if (refreshSnapshots.length === 1) {
+      refreshStarted.resolve();
+      await releaseRefresh.promise;
+    }
+  };
+
+  const reload = manager.reloadConfig();
+  await refreshStarted.promise;
+  const update = manager.updateConfig(configFor("updated"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const whileBlocked = await loadUpstreamConfig(serializedPath);
+  if (whileBlocked.servers[0]?.id !== "reloaded") {
+    releaseRefresh.resolve();
+    await Promise.allSettled([reload, update]);
+    throw new Error(`update escaped config lock: ${JSON.stringify(whileBlocked)}`);
+  }
+
+  releaseRefresh.resolve();
+  await Promise.all([reload, update]);
+  const persisted = await loadUpstreamConfig(serializedPath);
+  if (manager.getConfig().servers[0]?.id !== "updated" || persisted.servers[0]?.id !== "updated") {
+    throw new Error("serialized update did not become the final runtime and persisted config");
+  }
+  if (refreshSnapshots.join(",") !== "reloaded,updated") {
+    throw new Error(`unexpected refresh order: ${refreshSnapshots.join(",")}`);
+  }
+  if (manager.getConfigGeneration() !== 3) {
+    throw new Error(`expected config generation 3, got ${manager.getConfigGeneration()}`);
+  }
+});
 
 await run("jsonSchemaToZodShape respects required fields", async () => {
   const shape = jsonSchemaToZodShape({
@@ -155,6 +231,94 @@ await run("proxy refresh applies policy on discovery failure, refreshes metadata
   if (registered.has("shared__run")) throw new Error("disabled tool survived failed discovery");
 });
 
+await run("proxy refresh forwards signals and rethrows abort reasons", async () => {
+  const controller = new AbortController();
+  const abortReason = new DOMException("cancel discovery", "AbortError");
+  let receivedSignal;
+  const fakeServer = {
+    registerTool() {
+      throw new Error("aborted refresh must not register tools");
+    },
+  };
+  const fakeManager = {
+    listServerConfigs: () => [
+      { id: "abort", name: "Abort", enabled: true, expose: "all", tool_prefix: "abort" },
+    ],
+    async listTools(_id, options) {
+      receivedSignal = options?.signal;
+      controller.abort(abortReason);
+      throw abortReason;
+    },
+  };
+
+  let caught;
+  try {
+    await refreshProxiedTools(fakeServer, fakeManager, { signal: controller.signal });
+  } catch (error) {
+    caught = error;
+  }
+  if (receivedSignal !== controller.signal) throw new Error("refresh did not forward the request signal");
+  if (caught !== abortReason) throw new Error(`abort was swallowed or replaced: ${String(caught)}`);
+});
+
+await run("mcp_tools reports the resolved runtime proxy owner", async () => {
+  const registered = new Map();
+  const fakeServer = {
+    registerTool(name, config, callback) {
+      if (registered.has(name)) throw new Error(`duplicate registration: ${name}`);
+      const handle = {
+        config,
+        callback,
+        remove() {
+          if (registered.get(name) === handle) registered.delete(name);
+        },
+      };
+      registered.set(name, handle);
+      return handle;
+    },
+  };
+  const configs = [
+    { id: "a", name: "A", enabled: true, expose: "all", tool_prefix: "shared" },
+    { id: "b", name: "B", enabled: true, expose: "all", tool_prefix: "shared" },
+  ];
+  const tools = [{ name: "run", description: "shared", inputSchema: { type: "object", properties: {} } }];
+  const fakeManager = {
+    listServerConfigs: () => configs,
+    getServerConfig: (id) => configs.find((config) => config.id === id),
+    async listTools() {
+      return tools;
+    },
+    async callTool() {
+      return { content: [{ type: "text", text: "ok" }] };
+    },
+    getProxiedToolNames(config, discovered) {
+      return discovered.map((tool) => `${config.tool_prefix ?? config.id}__${tool.name}`);
+    },
+  };
+
+  await refreshProxiedTools(fakeServer, fakeManager);
+  registerMcpBridgeTools(fakeServer, fakeManager);
+  const callback = registered.get("mcp_tools")?.callback;
+  if (!callback) throw new Error("mcp_tools callback was not registered");
+
+  const ownerReport = await callback({ server_id: "a" }, {});
+  const ownerData = ownerReport.structuredContent?.data;
+  const ownerTool = ownerData?.tools?.[0];
+  if (ownerTool?.proxy_owner !== "a" || ownerTool?.proxied_as?.[0] !== "shared__run") {
+    throw new Error(`resolved owner missing from owner report: ${JSON.stringify(ownerData)}`);
+  }
+
+  const collisionReport = await callback({ server_id: "b" }, {});
+  const collisionData = collisionReport.structuredContent?.data;
+  const collisionTool = collisionData?.tools?.[0];
+  if (collisionTool?.proxy_owner !== "a") {
+    throw new Error(`collision owner was not projected: ${JSON.stringify(collisionData)}`);
+  }
+  if (collisionTool.proxied_as.length !== 0 || collisionData.proxied_tools.length !== 0) {
+    throw new Error(`non-owner was reported as proxied: ${JSON.stringify(collisionData)}`);
+  }
+});
+
 await run("shutdown invalidates pending upstream connections", async () => {
   const manager = new McpUpstreamManager(configPath);
   manager.config = {
@@ -183,6 +347,116 @@ await run("shutdown invalidates pending upstream connections", async () => {
   }
   if (manager.connections.size !== 0 || closeCount === 0) {
     throw new Error(`connection resurrected after shutdown: connections=${manager.connections.size} closes=${closeCount}`);
+  }
+});
+
+await run("close-pending connections are not reused and preserve replacement cache", async () => {
+  const manager = new McpUpstreamManager(configPath);
+  manager.config = {
+    version: 1,
+    servers: [{ id: "replaceable", name: "Replaceable", enabled: true, transport: "http", url: "http://invalid/mcp", expose: "all" }],
+  };
+
+  const releaseOldClose = deferred();
+  let oldCloseCalled = false;
+  const created = [];
+  const discoveryCounts = [];
+  manager.createTransport = async () => {
+    const index = created.length;
+    const client = {
+      listTools: async () => {
+        discoveryCounts[index] = (discoveryCounts[index] ?? 0) + 1;
+        return { tools: [{ name: `tool-${index}` }] };
+      },
+    };
+    const transport = {
+      close: async () => {
+        if (index === 0) {
+          oldCloseCalled = true;
+          await releaseOldClose.promise;
+        }
+      },
+    };
+    created.push({ client, transport });
+    return { client, transport, pid: null };
+  };
+
+  let disconnecting;
+  try {
+    const oldConnection = await manager.connect("replaceable");
+    disconnecting = manager.disconnect("replaceable");
+    await waitUntil(() => oldCloseCalled);
+
+    const replacement = await manager.connect("replaceable");
+    if (replacement === oldConnection) throw new Error("connect reused a connection whose close was pending");
+    if (created.length !== 2) throw new Error(`expected a replacement transport, got ${created.length}`);
+
+    releaseOldClose.resolve();
+    await disconnecting;
+
+    const replacementDiscoveryCount = discoveryCounts[1];
+    const tools = await manager.listTools("replaceable");
+    if (manager.connections.get("replaceable") !== replacement) {
+      throw new Error("old disconnect removed the replacement connection");
+    }
+    if (discoveryCounts[1] !== replacementDiscoveryCount) {
+      throw new Error("old disconnect removed the replacement tools cache");
+    }
+    if (tools[0]?.name !== "tool-1") throw new Error(`replacement cache returned unexpected tools: ${JSON.stringify(tools)}`);
+  } finally {
+    releaseOldClose.resolve();
+    if (disconnecting) await disconnecting.catch(() => undefined);
+    await manager.shutdown();
+  }
+});
+
+await run("active upstream operations hold an idle connection lease", async () => {
+  const manager = new McpUpstreamManager(configPath);
+  manager.config = {
+    version: 1,
+    servers: [{
+      id: "leased",
+      name: "Leased",
+      enabled: true,
+      transport: "http",
+      url: "http://invalid/mcp",
+      expose: "all",
+      idle_timeout_sec: 0.05,
+    }],
+  };
+
+  const releaseCall = deferred();
+  let operationStarted = false;
+  let closeCount = 0;
+  manager.createTransport = async () => ({
+    client: {
+      listTools: async () => ({ tools: [] }),
+      callTool: async () => {
+        operationStarted = true;
+        await releaseCall.promise;
+        return { content: [{ type: "text", text: "done" }] };
+      },
+    },
+    transport: { close: async () => { closeCount++; } },
+    pid: null,
+  });
+
+  const call = manager.callTool("leased", "slow");
+  try {
+    await waitUntil(() => operationStarted);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (closeCount !== 0 || !manager.connections.has("leased")) {
+      throw new Error(`idle timer closed an active operation: connections=${manager.connections.size} closes=${closeCount}`);
+    }
+
+    releaseCall.resolve();
+    await call;
+    await waitUntil(() => closeCount === 1);
+    if (manager.connections.has("leased")) throw new Error("idle connection remained after the operation lease ended");
+  } finally {
+    releaseCall.resolve();
+    await call.catch(() => undefined);
+    await manager.shutdown();
   }
 });
 

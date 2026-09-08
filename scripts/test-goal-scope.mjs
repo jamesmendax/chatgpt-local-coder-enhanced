@@ -4,6 +4,7 @@
  * adoptable via goal(action=bind).
  */
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,6 +25,7 @@ const { createRuntimeScope, runWithRuntimeScope } = await import("../dist/lib/ru
 const goals = await import("../dist/lib/goals.js");
 const tasks = await import("../dist/lib/durable-tasks.js");
 const broker = await import("../dist/lib/context-broker.js");
+const goalRunWeb = await import("../dist/lib/goal-run-web.js");
 
 function scopeFor(sessionId) {
   return createRuntimeScope({ workspaceRoot: WS, projectRoots: [WS] }, { sessionId });
@@ -40,6 +42,7 @@ try {
   const goal = await asSession("session-A", () =>
     goals.createGoal(WS, { objective: "Window A goal", success_criteria: [{ name: "crit", passed: false }] })
   );
+  await asSession("session-A", () => goalRunWeb.ensureGoalRunAuthority(WS, goal));
   const aResult = await asSession("session-A", () =>
     broker.appendHarnessRuntimeContextToResult(WS, baseResult(), { toolName: "fixture" })
   );
@@ -76,17 +79,18 @@ try {
     "the owning session's task must stay gated by its own unmet goal (mechanical gate intact)"
   );
 
-  // 4. Cross-session create: B cannot create a second goal while A holds one.
-  await assert.rejects(
-    () => asSession("session-B", () => goals.createGoal(WS, { objective: "B goal", success_criteria: [{ name: "x", passed: false }] })),
-    /ANOTHER ChatGPT window/,
-    "cross-session create must be rejected with the ownership error"
+  // 4. Cross-session create (Plan A): B creates its OWN goal in an independent
+  // shard while A holds one — the two windows never supersede each other.
+  const bGoal = await asSession("session-B", () =>
+    goals.createGoal(WS, { objective: "B goal", success_criteria: [{ name: "x", passed: false }] })
   );
-  await assert.rejects(
-    () => asSession("session-B", () => goals.createGoal(WS, { objective: "B goal", success_criteria: [{ name: "x", passed: false }], supersede: true })),
-    /ANOTHER ChatGPT window/,
-    "cross-session supersede must be rejected too"
-  );
+  assert.ok(bGoal.owner_session === "session-B", "B's goal must be owned by session-B");
+  // A's shard goal is untouched and still active.
+  const aStill = await asSession("session-A", () => goals.getGoal(WS));
+  assert.ok(aStill && aStill.id === goal.id && aStill.status === "active", "A's goal must be unaffected by B's create");
+  // B sees only its own goal, not A's.
+  const bSees = await asSession("session-B", () => goals.getGoal(WS));
+  assert.ok(bSees && bSees.id === bGoal.id, "B must resolve its own shard goal");
 
   // 5. Observation routing: B's tool calls must not write into A's task.
   await asSession("session-B", () =>
@@ -100,21 +104,40 @@ try {
     "B's observations must not land in A's task"
   );
 
-  // 6. bind: B adopts the goal; A goes silent; B receives the contract in-band.
-  await asSession("session-B", () => goals.bindGoalToSession(WS));
-  const bAfterBind = await asSession("session-B", () =>
+  // 6. bind (cross-turn handover): a brand-new session C (no shard of its own)
+  // adopts the goal carried by the global projection. Under Plan A, session A
+  // keeps its own independent shard and is unaffected by C's bind; the previous
+  // owner of the global projection (session B) goes silent.
+  const boundGoal = await asSession("session-C", () => goals.bindGoalToSession(WS));
+  assert.ok(boundGoal.owner_session === "session-C", "bind must transfer ownership to session-C");
+  assert.ok(boundGoal.id === bGoal.id, "bind must adopt the global-projection goal (B's goal)");
+  await asSession("session-C", () => goalRunWeb.synchronizeCommittedLegacyGoal(WS, boundGoal));
+  const cAfterBind = await asSession("session-C", () =>
     broker.appendHarnessRuntimeContextToResult(WS, baseResult(), { toolName: "fixture" })
   );
   assert.ok(
-    JSON.stringify(bAfterBind.content).includes("MUST_CONTINUE_TO_TOOL"),
-    "after bind, B must receive the continuation tail"
+    JSON.stringify(cAfterBind.content).includes("MUST_CONTINUE_TO_TOOL"),
+    "after bind, the adopting window must receive the continuation tail"
   );
-  const aAfterBind = await asSession("session-A", () =>
+  // A's independent shard goal is untouched by C's bind and still active.
+  const aAfterBind = await asSession("session-A", () => goals.getGoal(WS));
+  assert.ok(aAfterBind && aAfterBind.id === goal.id && aAfterBind.status === "active", "A's shard goal must remain active after C's bind");
+  const aResultAfterBind = await asSession("session-A", () =>
     broker.appendHarnessRuntimeContextToResult(WS, baseResult(), { toolName: "fixture" })
   );
   assert.ok(
-    !JSON.stringify(aAfterBind.content).includes("MUST_CONTINUE_TO_TOOL"),
-    "after bind, the previous owner window must go silent"
+    JSON.stringify(aResultAfterBind.content).includes("MUST_CONTINUE_TO_TOOL"),
+    "A must still receive its own goal tail because its shard is independent"
+  );
+  // B's shard has been adopted by C, so B no longer sees an active goal.
+  const bAfterBind = await asSession("session-B", () => goals.getGoal(WS));
+  assert.ok(!bAfterBind, "B must go silent after its goal is adopted by C");
+  const bResultAfterBind = await asSession("session-B", () =>
+    broker.appendHarnessRuntimeContextToResult(WS, baseResult(), { toolName: "fixture" })
+  );
+  assert.ok(
+    !JSON.stringify(bResultAfterBind.content).includes("MUST_CONTINUE_TO_TOOL"),
+    "B must not receive a tail after its goal is adopted by C"
   );
 
   // 7. Legacy unbound goal (no session context at creation) stays workspace-wide.
@@ -125,7 +148,38 @@ try {
   const legacySeen = await broker.buildHarnessRuntimeContext(wsLegacy, undefined);
   assert.ok(legacySeen.goal, "unbound goal must be visible to any session");
 
-  console.log("goal-scope: per-session isolation, cross-session create/supersede rejection, bind adoption, observation routing, legacy compatibility OK");
+  // 8. A corrupt session shard must fail closed; it must never be treated as
+  // "no goal" and overwritten by a later create.
+  const wsCorrupt = path.join(tmpRoot, "ws-corrupt");
+  await fs.mkdir(wsCorrupt, { recursive: true });
+  await asSession("session-corrupt", () =>
+    goals.createGoal(wsCorrupt, { objective: "corrupt me", success_criteria: [{ name: "c", passed: false }] })
+  );
+  const corruptSlug = crypto.createHash("sha256").update(path.resolve(wsCorrupt)).digest("hex").slice(0, 12);
+  const corruptGoalPath = path.join(
+    process.env.CODEX_HOME,
+    "projects",
+    corruptSlug,
+    "sessions",
+    "session-corrupt",
+    "goal.json"
+  );
+  await fs.writeFile(corruptGoalPath, "{ not valid json", "utf8");
+  await assert.rejects(
+    () => asSession("session-corrupt", () => goals.getGoal(wsCorrupt)),
+    /GOAL_STATE_UNREADABLE/,
+    "corrupt goal.json must fail closed instead of resolving to null"
+  );
+  await assert.rejects(
+    () => asSession("session-corrupt", () =>
+      goals.createGoal(wsCorrupt, { objective: "must not overwrite", success_criteria: [{ name: "safe", passed: false }] })
+    ),
+    /GOAL_STATE_UNREADABLE/,
+    "create must not replace a corrupt goal shard"
+  );
+  assert.equal(await fs.readFile(corruptGoalPath, "utf8"), "{ not valid json", "corrupt goal shard was modified");
+
+  console.log("goal-scope: per-session isolation, cross-session create/supersede rejection, bind adoption, observation routing, legacy compatibility, corrupt-shard fail-closed OK");
 } finally {
   await fs.rm(tmpRoot, { recursive: true, force: true });
 }

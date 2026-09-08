@@ -43,26 +43,14 @@ export async function globFiles(
   maxResults: number
 ): Promise<Array<{ path: string; mtimeMs: number }>> {
   if (!Number.isFinite(maxResults) || maxResults <= 0) return [];
+  const resultLimit = Math.floor(maxResults);
+  if (resultLimit <= 0) return [];
   const matcher = globToRegExp(pattern.replace(/\\/g, "/"));
   const matches: Array<{ path: string; mtimeMs: number }> = [];
 
-  function retainNewest(candidate: { path: string; mtimeMs: number }): void {
-    let low = 0;
-    let high = matches.length;
-    while (low < high) {
-      const middle = Math.floor((low + high) / 2);
-      const current = matches[middle];
-      const candidateBefore =
-        candidate.mtimeMs > current.mtimeMs ||
-        (candidate.mtimeMs === current.mtimeMs && candidate.path.localeCompare(current.path) < 0);
-      if (candidateBefore) high = middle;
-      else low = middle + 1;
-    }
-    matches.splice(low, 0, candidate);
-    if (matches.length > maxResults) matches.pop();
-  }
-
   async function walk(dir: string): Promise<void> {
+    if (matches.length >= resultLimit) return;
+
     let entries;
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
@@ -71,6 +59,7 @@ export async function globFiles(
     }
 
     for (const entry of entries) {
+      if (matches.length >= resultLimit) return;
       if (entry.name.startsWith(".") && entry.name !== ".") continue;
       const fullPath = path.join(dir, entry.name);
       const rel = path.relative(rootDir, fullPath).replace(/\\/g, "/");
@@ -84,11 +73,15 @@ export async function globFiles(
 
       try {
         const stat = await fs.stat(fullPath);
-        retainNewest({ path: fullPath, mtimeMs: stat.mtimeMs });
+        matches.push({ path: fullPath, mtimeMs: stat.mtimeMs });
       } catch {}
     }
   }
 
   await walk(rootDir);
+  matches.sort((left, right) => {
+    const byMtime = right.mtimeMs - left.mtimeMs;
+    return byMtime !== 0 ? byMtime : left.path.localeCompare(right.path);
+  });
   return matches;
 }

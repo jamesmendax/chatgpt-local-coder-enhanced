@@ -63,7 +63,6 @@ const unitScripts = [
   "scripts/test-harness-v2.mjs",
   "scripts/test-path-rules.mjs",
   "scripts/test-goal-mode.mjs",
-  "scripts/test-goal-watchdog.mjs",
   "scripts/test-durable-tasks.mjs",
   "scripts/test-command-observation.mjs",
   "scripts/test-repeat-guard.mjs",
@@ -72,6 +71,20 @@ const unitScripts = [
   "scripts/test-runtime-manifest.mjs",
   "scripts/test-tool-profile.mjs",
   "scripts/test-f0-characterization.mjs",
+  "scripts/test-goal-watchdog.mjs",
+  "scripts/test-skills-plugins.mjs",
+  "scripts/test-skill-resolution-contracts.mjs",
+  "scripts/test-child-env.mjs",
+  "scripts/test-skill-installer.mjs",
+  "scripts/test-skills-admin-api.mjs",
+  "desktop/scripts/test-stage-sanitize.mjs",
+  "desktop/scripts/test-zip-safety.mjs",
+  "scripts/test-result-pipeline.mjs",
+  "scripts/test-goal-run-state.mjs",
+  "scripts/test-goal-run-store.mjs",
+  "scripts/test-goal-run-policy.mjs",
+  "scripts/test-goal-run-web.mjs",
+  "scripts/test-goal-web-freeze.mjs",
   "scripts/test-invocation-gateway.mjs",
   "scripts/test-shell-persist.mjs",
   "scripts/test-agent-harness.mjs",
@@ -107,7 +120,7 @@ server.stderr?.on("data", (d) => (serverLog += d));
 try {
   const health = await waitFor(`http://127.0.0.1:${mcpPort}/health`);
   if (health.status !== "ok" || health.toolProfile !== "slim") throw new Error("public health invalid");
-  if (health.runtime?.tool_count !== 27) throw new Error(`health runtime tool count invalid: ${health.runtime?.tool_count}`);
+  if (health.runtime?.tool_count !== 30) throw new Error(`health runtime tool count invalid: ${health.runtime?.tool_count}`);
   if (health.runtime?.stale_build !== false) throw new Error("temporary server started with stale build");
   if (!/^[a-f0-9]{16}$/.test(health.runtime?.build_id || "")) throw new Error("health runtime build id invalid");
   for (const privateField of ["workspace", "defaultCwd", "mcpEndpoints", "instructions"]) {
@@ -154,8 +167,8 @@ try {
   // protocol framing is not tool-surface growth and drifts between clients.
   const bytes = Buffer.byteLength(JSON.stringify({ tools }), "utf-8");
   console.log(`OK  tools/list: ${tools.length} tools, ${Math.round(bytes / 1024)}KB`);
-  if (tools.length !== 27) throw new Error(`expected 27 slim tools, got ${tools.length}`);
-  if (bytes > 23_000) throw new Error(`slim tools/list budget exceeded: ${bytes} bytes`);
+  if (tools.length !== 30) throw new Error(`expected 30 slim tools, got ${tools.length}`);
+  if (bytes > 27_000) throw new Error(`slim tools/list budget exceeded: ${bytes} bytes`);
   if (tools.length > 30) console.warn(`WARN tools/list has ${tools.length} tools — consider slim profile`);
   if (!tools.some((t) => t.name === "apply_patch")) throw new Error("apply_patch missing");
   if (!tools.some((t) => t.name === "visual_review")) throw new Error("visual_review missing from slim tools/list");

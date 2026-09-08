@@ -14,14 +14,14 @@ function slug(workspace) {
   return crypto.createHash("sha256").update(path.resolve(workspace)).digest("hex").slice(0, 12);
 }
 
-async function seedGoal(codexHome, workspace, status = "active") {
+async function seedGoal(codexHome, workspace, status = "active", criterionPassed = false) {
   const stateDir = path.join(codexHome, "projects", slug(workspace));
   await fs.mkdir(path.join(stateDir, "tasks"), { recursive: true });
   await fs.writeFile(path.join(stateDir, "goal.json"), JSON.stringify({
     id: "watchdog-test",
     status,
     updated_at: new Date().toISOString(),
-    success_criteria: [{ name: "finish test", passed: false }],
+    success_criteria: [{ name: "finish test", passed: criterionPassed }],
   }, null, 2));
   return stateDir;
 }
@@ -82,6 +82,93 @@ assert.equal(stopped.role, "fallback_alert_only");
 assert.equal(stopped.parent_bound, false);
 await waitUntil(() => !lifecycle.goalWatchdogStatus().running);
 await waitUntil(async () => !(await exists(pidFile)));
+
+// All criteria passed while the goal is still active is a separate reminder
+// path. It must share the normal reminder throttle instead of notifying every
+// polling interval.
+const allPassHome = path.join(tmpRoot, "codex-home-all-pass");
+const allPassWorkspace = path.join(tmpRoot, "workspace-all-pass");
+await fs.mkdir(allPassWorkspace, { recursive: true });
+const allPassStateDir = await seedGoal(allPassHome, allPassWorkspace, "active", true);
+const allPassLog = path.join(allPassStateDir, "goal-watchdog.log");
+const allPassParent = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { windowsHide: true, stdio: "ignore" });
+assert.ok(allPassParent.pid);
+const allPassWatchdog = spawn(process.execPath, [path.join(root, "scripts", "goal-watchdog.mjs")], {
+  cwd: root,
+  env: {
+    ...process.env,
+    CODEX_HOME: allPassHome,
+    WATCH_WORKSPACE: allPassWorkspace,
+    WATCHDOG_PARENT_PID: String(allPassParent.pid),
+    WATCHDOG_POLL_MS: "50",
+    GOAL_STALL_GAP_MS: "999999999",
+    WATCHDOG_REMIND_MS: "999999999",
+  },
+  windowsHide: true,
+  stdio: "ignore",
+});
+await waitUntil(async () => {
+  const text = await fs.readFile(allPassLog, "utf8").catch(() => "");
+  return text.split("all criteria passed but not completed").length - 1 === 1;
+});
+await new Promise((resolve) => setTimeout(resolve, 250));
+const allPassLogText = await fs.readFile(allPassLog, "utf8");
+if (allPassLogText.split("all criteria passed but not completed").length - 1 !== 1) {
+  throw new Error("all-criteria-pass reminder bypassed the existing throttle");
+}
+allPassParent.kill();
+await new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error("all-pass watchdog did not stop")), 4000);
+  allPassWatchdog.once("exit", () => { clearTimeout(timer); resolve(); });
+});
+await waitUntil(async () => !(await exists(path.join(allPassStateDir, "goal-watchdog.pid.json"))));
+
+// Session shards: each ChatGPT conversation gets its own watchdog state.
+// A paused legacy projection must not satisfy an active shard, and stopping
+// one session must not silence another session in the same workspace.
+const codexHomeSessions = path.join(tmpRoot, "codex-home-sessions");
+const sessionsWorkspace = path.join(tmpRoot, "workspace-sessions");
+await fs.mkdir(sessionsWorkspace, { recursive: true });
+const sessionsStateDir = await seedGoal(codexHomeSessions, sessionsWorkspace, "paused");
+const sessionA = "watchdog-session-A";
+const sessionB = "watchdog-session-B";
+async function seedSessionGoal(sessionId, status = "active") {
+  const dir = path.join(sessionsStateDir, "sessions", sessionId);
+  await fs.mkdir(dir, { recursive: true });
+  const goalFile = path.join(dir, "goal.json");
+  await fs.writeFile(goalFile, JSON.stringify({
+    id: `watchdog-${sessionId}`,
+    status,
+    updated_at: new Date().toISOString(),
+    success_criteria: [{ name: "finish shard test", passed: false }],
+  }, null, 2));
+  return {
+    dir,
+    goalFile,
+    pidFile: path.join(dir, "goal-watchdog.pid.json"),
+    logFile: path.join(dir, "goal-watchdog.log"),
+  };
+}
+const shardA = await seedSessionGoal(sessionA);
+const shardB = await seedSessionGoal(sessionB);
+process.env.CODEX_HOME = codexHomeSessions;
+const watchdogA = lifecycle.startGoalWatchdog(sessionsWorkspace, sessionA);
+const watchdogB = lifecycle.startGoalWatchdog(sessionsWorkspace, sessionB);
+assert.equal(watchdogA.session_id, sessionA);
+assert.equal(watchdogB.session_id, sessionB);
+assert.notEqual(watchdogA.pid, watchdogB.pid);
+await waitUntil(() => exists(shardA.pidFile));
+await waitUntil(() => exists(shardB.pidFile));
+const stoppedA = lifecycle.stopGoalWatchdog(sessionsWorkspace, sessionA);
+assert.equal(stoppedA.running, false);
+await waitUntil(async () => !(await exists(shardA.pidFile)));
+assert.equal(lifecycle.goalWatchdogStatus(sessionsWorkspace, sessionB).running, true);
+const stoppedAll = lifecycle.stopGoalWatchdog(sessionsWorkspace);
+assert.equal(stoppedAll.running, false);
+await waitUntil(async () => !(await exists(shardB.pidFile)));
+const shardALog = await fs.readFile(shardA.logFile, "utf8").catch(() => "");
+assert.match(shardALog, new RegExp(`watchdog started:.*session=${sessionA}`));
+assert.doesNotMatch(shardALog, new RegExp(`session=${sessionB}`));
 
 // Independent parent-death check: even if the MCP disappears without running
 // goal(pause/complete/cancel), the watchdog must self-terminate.

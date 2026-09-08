@@ -7,6 +7,7 @@ const https = require("https");
 const { spawn } = require("child_process");
 const { ManagedProcess, killTree, sleep } = require("./processes");
 const status = require("./status");
+const { parseManagedDiagnostic } = require("./tunnel-health");
 const harness = require("./harness");
 const paths = require("./paths");
 const configStore = require("./config");
@@ -17,11 +18,6 @@ const TUNNEL_PATTERN = /tunnel-client(\.exe)?/i;
 const TUNNEL_VERSION = "v0.0.10";
 const TUNNEL_ZIP = `tunnel-client-${TUNNEL_VERSION}-windows-amd64.zip`;
 const TUNNEL_URL = `https://github.com/openai/tunnel-client/releases/download/${TUNNEL_VERSION}/${TUNNEL_ZIP}`;
-
-// tunnel-client 的 /readyz 只验证"守护进程在跑且本地 MCP 可达"，即使 Tunnel ID / Runtime Key
-// 无效也会返回 ready。真正的控制平面认证失败只体现在日志里，因此单独扫描这些特征。
-const TUNNEL_AUTH_FAIL = /invalid_api_key|"?status"?[:=]\s*401\b|\b401\b[^0-9]{0,40}(unauthorized|invalid)|unauthorized/i;
-const TUNNEL_META_FAIL = /tunnel metadata fetch failed|poll failed; backing off/i;
 
 class Services extends EventEmitter {
   constructor() {
@@ -34,17 +30,20 @@ class Services extends EventEmitter {
       proc.on("state", () => { this.refresh().catch(() => {}); });
     }
     // 控制平面认证诊断：只从当前隧道进程的日志推导，进程重启时清空。
-    this.tunnelDiag = { authError: null, metaError: null };
+    this.tunnelDiagnostics = [];
     this.tunnel.on("log", (line) => {
-      if (TUNNEL_AUTH_FAIL.test(line)) this.tunnelDiag.authError = { at: Date.now(), line: line.slice(0, 300) };
-      else if (TUNNEL_META_FAIL.test(line)) this.tunnelDiag.metaError = { at: Date.now(), line: line.slice(0, 300) };
+      const item = parseManagedDiagnostic(line);
+      if (item) {
+        this.tunnelDiagnostics.push(item);
+        if (this.tunnelDiagnostics.length > 64) this.tunnelDiagnostics.shift();
+      }
     });
     this.lastStatus = null;
     this.busy = false;
   }
 
   note(text) {
-    const line = `${new Date().toISOString().slice(11, 19)}   ${text}`;
+    const line = `${new Date().toLocaleTimeString("en-GB", { hour12: false })}   ${text}`;
     this.launcherLines.push(line);
     if (this.launcherLines.length > 1000) this.launcherLines.shift();
     this.emit("log", { name: "launcher", line });
@@ -57,7 +56,11 @@ class Services extends EventEmitter {
   async collectStatus() {
     const cfg = this.config();
     const health = await status.probeMcp(cfg.mcpPort);
-    const tunnelProbe = await status.probeTunnel(cfg.tunnelPort);
+    const tunnelProbe = await status.probeTunnel(cfg.tunnelPort, {
+      expectedTunnelId: cfg.tunnelId,
+      managedStartedAt: this.tunnel.isAlive() ? this.tunnel.startedAt : null,
+      managedDiagnostics: this.tunnel.isAlive() ? this.tunnelDiagnostics : [],
+    });
 
     const mcpManaged = this.mcp.isAlive();
     const mcpOwner = mcpManaged ? null : status.classifyPortOwner(cfg.mcpPort, MCP_PATTERN);
@@ -92,9 +95,13 @@ class Services extends EventEmitter {
         pid: tunnelManaged ? this.tunnel.pid : (tunnelOwner && tunnelOwner.pid) || null,
         reachable: tunnelProbe.reachable,
         ready: tunnelProbe.ready,
-        // ready 只说明本地链路通；凭据是否被控制平面接受要看下面两个诊断。
-        authError: tunnelManaged ? this.tunnelDiag.authError : null,
-        metaError: tunnelManaged ? this.tunnelDiag.metaError : null,
+        // Cloud state comes from real poll metrics plus scoped errors, including external daemons.
+        cloudState: tunnelProbe.cloudState,
+        lastPollSuccessAt: tunnelProbe.lastPollSuccessAt,
+        instanceId: tunnelProbe.instanceId,
+        proxyRoute: tunnelProbe.proxyRoute,
+        authError: tunnelProbe.authError,
+        metaError: tunnelProbe.metaError,
         external: !tunnelManaged && tunnelProbe.ready,
         externalRecognized: Boolean(tunnelOwner && tunnelOwner.recognized),
         portOccupiedByUnknown: Boolean(!tunnelManaged && !tunnelProbe.ready && tunnelOwner && tunnelOwner.pid),
@@ -176,7 +183,8 @@ class Services extends EventEmitter {
     const cfg = this.config();
     if (!cfg.setupDone) throw new Error("请先完成初始化。");
     if (this.tunnel.isAlive()) { this.note("Tunnel 已由启动器管理，跳过。"); return; }
-    const probe = await status.probeTunnel(cfg.tunnelPort);
+    const probe = await status.probeTunnel(cfg.tunnelPort, { expectedTunnelId: cfg.tunnelId });
+    if (probe.metaError?.code === "tunnel_mismatch") throw new Error("本地端口上的 Tunnel ID 与配置不符；未终止外部进程，请检查端口或配置。");
     if (probe.ready) {
       this.note(`端口 ${cfg.tunnelPort} 已有就绪的隧道，沿用该外部进程。`);
       return;
@@ -188,8 +196,9 @@ class Services extends EventEmitter {
     if (!fs.existsSync(paths.tunnelClientPath())) throw new Error("找不到 tunnel-client.exe，请先在初始化页下载。");
     const apiKey = configStore.decryptKey(cfg);
     if (!apiKey) throw new Error("尚未保存 Runtime API Key。");
-    this.tunnelDiag = { authError: null, metaError: null };
-    const spec = harness.tunnelSpawnSpec(cfg, apiKey, "run");
+    this.tunnelDiagnostics = [];
+    const spec = await harness.tunnelSpawnSpec(cfg, apiKey, "run");
+    this.note(`Tunnel 出站策略：${spec.proxyInfo.mode === "proxy" ? spec.proxyInfo.url : "直连"}（${spec.proxyInfo.source}）；本地 MCP 直连。`);
     const pid = this.tunnel.start(spec);
     this.note(`Tunnel 已启动，PID ${pid}，等待 /readyz ...`);
     const ok = await this.waitFor(async () => (await status.probeTunnel(cfg.tunnelPort)).ready, 60000, "Tunnel /readyz");
@@ -198,12 +207,18 @@ class Services extends EventEmitter {
       throw new Error("Tunnel 未在 60 秒内就绪，请检查 Tunnel 日志（常见原因：Tunnel ID / Runtime Key 错误或网络不通）。");
     }
     this.tunnel.markRunning();
-    // /readyz 就绪后再给控制平面几秒，让认证失败（401）有机会出现在日志里。
+    // This short settle may surface an auth failure; it is not cloud-success evidence.
     await sleep(2500);
-    if (this.tunnelDiag.authError) {
-      this.note("警告：隧道本地已就绪，但控制平面拒绝了凭据（401 / invalid_api_key）。ChatGPT 仍无法连接，请检查 Tunnel ID 与 Runtime API Key。");
+    const cloud = await status.probeTunnel(cfg.tunnelPort, { expectedTunnelId: cfg.tunnelId,
+      managedStartedAt: this.tunnel.startedAt, managedDiagnostics: this.tunnelDiagnostics });
+    if (cloud.authError) {
+      this.note("警告：隧道本地已就绪，但控制平面拒绝了凭据（401/403）。请检查 Tunnel ID 与 Runtime API Key。");
+    } else if (cloud.metaError) {
+      this.note("警告：本地 ready，但云端连接异常，正在退避重试；请检查 Tunnel 出站代理和网络。");
+    } else if (cloud.cloudState === "online") {
+      this.note("Tunnel 已完成真实云端轮询，本地 MCP 也已就绪。");
     } else {
-      this.note(`Tunnel 就绪: http://127.0.0.1:${cfg.tunnelPort}/readyz`);
+      this.note("Tunnel 本地已就绪；正在等待首轮云端轮询确认（通常约 30 秒），尚不表示云端在线。");
     }
   }
 
@@ -285,10 +300,10 @@ class Services extends EventEmitter {
     if (this.mcp.isAlive()) await this.mcp.stop(5000);
   }
 
-  /** 运行 tunnel-client doctor 验证凭据；输出脱敏后返回。 */
-  runDoctor(cfg, apiKey, onLine) {
+  /** doctor validates local preflight; only successful polling proves remote authentication. */
+  async runDoctor(cfg, apiKey, onLine) {
+    const spec = await harness.tunnelSpawnSpec(cfg, apiKey, "doctor");
     return new Promise((resolve) => {
-      const spec = harness.tunnelSpawnSpec(cfg, apiKey, "doctor");
       let output = "";
       let child;
       try {

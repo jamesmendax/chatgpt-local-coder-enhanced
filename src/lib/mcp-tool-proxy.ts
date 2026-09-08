@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 
 import type { McpUpstreamManager } from "./mcp-upstream-manager.js";
 import type { UpstreamServerConfig } from "./mcp-upstream-config.js";
@@ -30,6 +31,21 @@ function getRegistry(server: McpServer): Map<string, ProxyEntry> {
     proxyRegistry.set(server, map);
   }
   return map;
+}
+
+export interface ResolvedProxyOwner {
+  ownerId: string;
+  upstreamToolName: string;
+}
+
+export function getResolvedProxyOwner(
+  server: McpServer,
+  proxyName: string
+): ResolvedProxyOwner | undefined {
+  const entry = getRegistry(server).get(proxyName);
+  return entry
+    ? { ownerId: entry.ownerId, upstreamToolName: entry.upstreamToolName }
+    : undefined;
 }
 
 function jsonSchemaNodeToZod(schema: unknown): z.ZodTypeAny {
@@ -145,9 +161,14 @@ function shouldExposeTool(config: UpstreamServerConfig, toolName: string): boole
   return config.expose === "all" || (config.tools ?? []).includes(toolName);
 }
 
-export async function refreshProxiedTools(server: McpServer, manager: McpUpstreamManager): Promise<string[]> {
+export async function refreshProxiedTools(
+  server: McpServer,
+  manager: McpUpstreamManager,
+  options?: RequestOptions
+): Promise<string[]> {
+  const requestOptions = withRuntimeSignal(options);
   const previous = refreshQueues.get(server) ?? Promise.resolve([] as string[]);
-  const run = previous.catch(() => []).then(() => refreshProxiedToolsNow(server, manager));
+  const run = previous.catch(() => []).then(() => refreshProxiedToolsNow(server, manager, requestOptions));
   refreshQueues.set(server, run);
   try {
     return await run;
@@ -156,7 +177,14 @@ export async function refreshProxiedTools(server: McpServer, manager: McpUpstrea
   }
 }
 
-async function refreshProxiedToolsNow(server: McpServer, manager: McpUpstreamManager): Promise<string[]> {
+async function refreshProxiedToolsNow(
+  server: McpServer,
+  manager: McpUpstreamManager,
+  options?: RequestOptions
+): Promise<string[]> {
+  const signal = options?.signal;
+  throwIfAborted(signal);
+  const startingGeneration = readConfigGeneration(manager);
   const registry = getRegistry(server);
   const desired = new Map<string, DesiredProxy>();
 
@@ -166,20 +194,27 @@ async function refreshProxiedToolsNow(server: McpServer, manager: McpUpstreamMan
   const enabled = manager.listServerConfigs().filter(
     (config) => config.enabled && config.expose !== "none" && config.expose !== "meta_only"
   );
-  const signal = getRuntimeScope()?.signal;
   const upstreams = await Promise.all(
     enabled.map(async (config) => {
       try {
+        throwIfAborted(signal);
         return {
           config,
-          tools: await manager.listTools(config.id, signal ? { signal } : undefined),
+          tools: await manager.listTools(config.id, options),
           failed: false,
         };
-      } catch {
+      } catch (error) {
+        if (isAbortError(error, signal)) throw error;
         return { config, tools: [] as Tool[], failed: true };
       }
     })
   );
+
+  throwIfAborted(signal);
+  const endingGeneration = readConfigGeneration(manager);
+  if (startingGeneration !== undefined && endingGeneration !== startingGeneration) {
+    throw new Error("Upstream configuration changed during proxy refresh");
+  }
 
   for (const { config, tools, failed } of upstreams) {
     const prefix = `${config.tool_prefix ?? config.id}__`;
@@ -258,13 +293,42 @@ async function refreshProxiedToolsNow(server: McpServer, manager: McpUpstreamMan
         // Transparent MCP proxy: preserve the upstream CallToolResult exactly
         // (text, images, embedded resources, structuredContent and isError).
         const signal = getRuntimeScope()?.signal;
-        return (await manager.callTool(config.id, tool.name, args ?? {}, signal ? { signal } : undefined)) as any;
+        return (await manager.callTool(
+          config.id,
+          tool.name,
+          args ?? {},
+          signal ? { signal } : undefined
+        )) as any;
       }
     );
     registry.set(proxyName, { registered, ownerId: config.id, upstreamToolName: tool.name });
   }
 
   return [...desired.keys()];
+}
+
+function withRuntimeSignal(options?: RequestOptions): RequestOptions | undefined {
+  const signal = options?.signal ?? getRuntimeScope()?.signal;
+  if (!signal) return options;
+  if (options?.signal === signal) return options;
+  return { ...options, signal };
+}
+
+function readConfigGeneration(manager: McpUpstreamManager): number | undefined {
+  const getter = (manager as McpUpstreamManager & {
+    getConfigGeneration?: () => number;
+  }).getConfigGeneration;
+  return typeof getter === "function" ? getter.call(manager) : undefined;
+}
+
+function isAbortError(error: unknown, signal?: AbortSignal): boolean {
+  return signal?.aborted || (error instanceof Error && error.name === "AbortError");
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  throw new DOMException("The operation was aborted", "AbortError");
 }
 
 export function clearProxiedTools(server: McpServer): void {

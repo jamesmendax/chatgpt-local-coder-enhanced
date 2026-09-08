@@ -68,6 +68,9 @@ function fillSetupForm() {
   $("f-workspace").value = c.workspacePath || info.legacyWorkspace || "";
   $("f-mcp-port").value = c.mcpPort || 3000;
   $("f-tunnel-port").value = c.tunnelPort || 8080;
+  $("f-tunnel-proxy-mode").value = c.tunnelProxyMode || "auto";
+  $("f-tunnel-proxy-url").value = c.tunnelProxyUrl || "";
+  $("f-tunnel-proxy-url").disabled = $("f-tunnel-proxy-mode").value !== "custom";
   $("f-admin-port").value = c.adminPort || 3001;
   $("f-tool-profile").value = c.toolProfile || "slim";
   $("f-auto-start").checked = Boolean(c.autoStart);
@@ -110,6 +113,8 @@ function readSetupForm() {
     workspacePath: $("f-workspace").value.trim(),
     mcpPort: Number($("f-mcp-port").value),
     tunnelPort: Number($("f-tunnel-port").value),
+    tunnelProxyMode: $("f-tunnel-proxy-mode").value,
+    tunnelProxyUrl: $("f-tunnel-proxy-url").value.trim(),
     adminPort: Number($("f-admin-port").value),
     toolProfile: $("f-tool-profile").value,
     autoStart: $("f-auto-start").checked,
@@ -186,6 +191,50 @@ async function loadSkillCatalog() {
   renderSkillCatalog();
 }
 
+function renderSkillList(holder, skills, source, removable) {
+  holder.textContent = "";
+  const rows = Array.isArray(skills) ? skills : [];
+  if (!rows.length) {
+    holder.appendChild(emptyNode("未发现"));
+    return;
+  }
+  for (const skill of rows) holder.appendChild(actionSkillRow(skill, source, removable));
+}
+
+function renderMutableSkillLists() {
+  const catalog = state.skills || {};
+  renderSkillList($("installed-skills-list"), catalog.installed, "installed", true);
+  renderSkillList($("builtin-skills-list"), catalog.builtin, "builtin", false);
+}
+
+function renderExternalSkillList() {
+  const holder = $("registered-skills-list");
+  holder.textContent = "";
+  const rows = Array.isArray(state.registrations) ? state.registrations : [];
+  if (!rows.length) {
+    holder.appendChild(emptyNode("保存后将清空外部注册。"));
+    return;
+  }
+  for (const skill of rows) holder.appendChild(registeredSkillRow(skill));
+}
+
+function renderSkillCatalog() {
+  const catalog = state.skills || {};
+  const computerUse = catalog.computerUse || {};
+  const toggle = $("chk-computer-use");
+  toggle.checked = computerUse.enabled === true;
+  toggle.disabled = computerUse.available === false;
+  toggle.title = computerUse.available === false ? "当前环境没有可用的 Computer Use Skill" : "";
+
+  const configPath = $("skills-config-path");
+  configPath.textContent = catalog.configPath || "profiles/plugins.json";
+  configPath.title = catalog.configPath || "";
+
+  renderMutableSkillLists();
+  renderExternalSkillList();
+  renderDiscoveredSkills($("project-skills-list"), catalog.project);
+}
+
 function emptyNode(text) {
   const div = document.createElement("div");
   div.className = "empty";
@@ -252,7 +301,7 @@ function actionSkillRow(skill, source, removable) {
     try {
       const result = await call("setSkillEnabled", { id: skill.id || skill.name, source, enabled: checkbox.checked });
       state.skills = result.catalog;
-      renderSkillCatalog();
+      renderMutableSkillLists();
       toast((skill.id || skill.name) + " 已" + (checkbox.checked ? "启用" : "禁用"), "success", 2500);
     } catch (err) {
       checkbox.checked = !checkbox.checked;
@@ -271,7 +320,7 @@ function actionSkillRow(skill, source, removable) {
       try {
         const result = await call("uninstallSkill", { id: skill.id || skill.name });
         state.skills = result.catalog;
-        renderSkillCatalog();
+        renderMutableSkillLists();
         toast("Skill 已卸载", "success", 3000);
       } catch (err) {
         toast(err.message, "error", 9000);
@@ -434,7 +483,7 @@ async function confirmInstall() {
       overwrite: true,
     });
     state.skills = result.catalog;
-    renderSkillCatalog();
+    renderMutableSkillLists();
     clearInstallPanel(false);
     toast("已安装 " + result.result.id, "success", 5000);
   } catch (err) {
@@ -487,8 +536,10 @@ function renderStatus(s) {
   if (t.managed && t.state === "starting") { tCls = "busy"; tText = "连接中"; }
   else if (t.managed && t.state === "stopping") { tCls = "busy"; tText = "停止中"; }
   else if (t.authError) { tCls = "err"; tText = "凭据被拒 (401)"; }
-  else if (t.ready && t.metaError) { tCls = "warn"; tText = "控制平面异常"; }
-  else if (t.ready) { tCls = "ok"; tText = "在线"; }
+  else if (t.metaError || t.cloudState === "error") { tCls = "warn"; tText = "云端连接异常"; }
+  else if (t.ready && t.cloudState === "online") { tCls = "ok"; tText = "云端已连接"; }
+  else if (t.ready && t.cloudState === "stale") { tCls = "warn"; tText = "轮询状态过期"; }
+  else if (t.ready) { tCls = "warn"; tText = "本地就绪 · 云端待确认"; }
   else if (t.reachable) { tCls = "warn"; tText = "未就绪"; }
   else if (t.portOccupiedByUnknown) { tCls = "warn"; tText = "端口被占用"; }
   else if (t.state === "error") { tCls = "err"; tText = "异常退出"; }
@@ -499,13 +550,17 @@ function renderStatus(s) {
   $("tunnel-id").textContent = cfg.tunnelId || "（未配置）";
   $("tunnel-id").title = cfg.tunnelId || "";
   $("tunnel-port").textContent = cfg.tunnelPort;
-  if (t.authError) {
-    $("tunnel-ready").textContent = "本地 ready，但控制平面 401";
-    $("tunnel-ready").title = t.authError.line;
-  } else {
-    $("tunnel-ready").textContent = t.ready ? "ready" : (t.reachable ? "not ready" : "不可达");
-    $("tunnel-ready").title = "";
-  }
+  $("tunnel-ready").textContent = t.ready ? "ready（仅本地链路）" : (t.reachable ? "not ready" : "不可达");
+  $("tunnel-ready").title = "此接口只证明 Tunnel 能连接本地 MCP，不代表云端可用。";
+  const cloudError = t.authError || t.metaError;
+  $("tunnel-cloud").textContent = cloudError ? (t.authError ? "认证失败，请检查 Runtime Key/Tunnel ID" : "连接中断，正在退避重试；请检查代理/网络")
+    : t.cloudState === "online" ? `最近成功：${new Date(t.lastPollSuccessAt).toLocaleTimeString()}`
+    : t.cloudState === "stale" ? "长时间未收到成功轮询，请检查代理/网络"
+    : t.ready ? "等待首轮成功（通常约 30 秒）" : "尚未连接";
+  $("tunnel-cloud").title = cloudError ? cloudError.line : "以真实成功轮询指标为准，不以进程存在或 readyz 冒充在线。";
+  const route = t.proxyRoute;
+  $("tunnel-route").textContent = route ? (route.mode === "proxy" ? `代理 · ${route.url}` : "直连") : "—";
+  $("tunnel-route").title = route ? `策略来源：${route.source || "tunnel-client"}；本地 MCP 直连` : "";
   $("tunnel-workspace").textContent = cfg.workspacePath || "—";
   $("tunnel-workspace").title = cfg.workspacePath || "";
 
@@ -692,6 +747,9 @@ function bind() {
   $("btn-mcp-start").addEventListener("click", () => action("startMcp"));
   $("btn-mcp-stop").addEventListener("click", () => action("stopMcp"));
   $("btn-mcp-restart").addEventListener("click", () => action("restartMcp", "MCP 重启"));
+  $("f-tunnel-proxy-mode").addEventListener("change", () => {
+    $("f-tunnel-proxy-url").disabled = $("f-tunnel-proxy-mode").value !== "custom";
+  });
   $("btn-tunnel-start").addEventListener("click", () => action("startTunnel"));
   $("btn-tunnel-stop").addEventListener("click", () => action("stopTunnel"));
 

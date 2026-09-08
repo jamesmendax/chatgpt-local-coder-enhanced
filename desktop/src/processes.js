@@ -30,7 +30,7 @@ class ManagedProcess extends EventEmitter {
   }
 
   appendLine(stream, text) {
-    const stamp = new Date().toISOString().slice(11, 19);
+    const stamp = new Date().toLocaleTimeString("en-GB", { hour12: false });
     const line = `${stamp} ${stream === "stderr" ? "! " : "  "}${text}`;
     this.lines.push(line);
     if (this.lines.length > MAX_LINES) this.lines.splice(0, this.lines.length - MAX_LINES);

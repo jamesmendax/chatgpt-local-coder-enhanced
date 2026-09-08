@@ -96,7 +96,7 @@ try {
       current_phase: "Run harness checks",
     },
   }));
-  if (createdGoal.continue_execution !== true || !String(createdGoal.execution_contract || "").includes("continuous execution")) {
+  if (createdGoal.continue_execution !== true || !String(createdGoal.execution_contract || "").includes("GOAL RUN POLICY") || !String(createdGoal.execution_contract || "").includes("RUNNING")) {
     throw new Error("goal create result missing the continuation-contract signal");
   }
 
@@ -119,6 +119,10 @@ try {
   }
   if (!tested.full_output_path) throw new Error("run_command full_output_path missing");
   await fs.stat(tested.full_output_path);
+  const testEvidenceId = tested.goal_run_evidence?.id;
+  if (!testEvidenceId || tested.goal_run_evidence.verifies_criterion !== true) {
+    throw new Error(`run_command did not expose successful GoalRun evidence: ${JSON.stringify(tested.goal_run_evidence)}`);
+  }
 
   const started = data(await client.callTool({
     name: "start_process",
@@ -168,7 +172,15 @@ try {
     arguments: {
       action: "update",
       current_phase: "Finish delivery",
-      success_criteria: [{ name: "tests pass", passed: true, detail: "node --test passed" }],
+    },
+  }));
+
+  data(await client.callTool({
+    name: "goal",
+    arguments: {
+      action: "confirm",
+      criterion: "tests pass",
+      evidence_ids: [testEvidenceId],
     },
   }));
 
@@ -193,6 +205,93 @@ try {
   const afterComplete = await client.callTool({ name: "task_state", arguments: { action: "resume" } });
   resumeFailed = afterComplete.structuredContent?.ok === false;
   if (!resumeFailed) throw new Error("completed task remained active");
+
+  // Full-profile Task APIs must apply the same current-session ownership
+  // check as the compact task_state surface. This fixture also exercises the
+  // result pipeline's observation/context projection for foreign/no-session
+  // calls without exposing the owner's task or evidence.
+  const previousProfile = process.env.CHATGPT_TOOL_PROFILE;
+  const taskApiWorkspace = path.join(tmpRoot, "task-api-workspace");
+  await fs.mkdir(taskApiWorkspace, { recursive: true });
+  let taskApiServer;
+  let taskApiClient;
+  try {
+    process.env.CHATGPT_TOOL_PROFILE = "full";
+    taskApiServer = createMcpServer(taskApiWorkspace, 30_000, [taskApiWorkspace], true);
+    taskApiClient = new Client({ name: "task-session-ownership-test", version: "1" });
+    const [taskApiClientTransport, taskApiServerTransport] = InMemoryTransport.createLinkedPair();
+    await taskApiServer.connect(taskApiServerTransport);
+    await taskApiClient.connect(taskApiClientTransport);
+    taskApiServerTransport.sessionId = "transport-owner-A";
+
+    const owned = data(await taskApiClient.callTool({
+      name: "task_create",
+      arguments: {
+        goal: "Verify full Task API ownership",
+        current_step: "Keep private state isolated",
+        blocking_checks: [{ name: "owner check", passed: true }],
+        notes: ["PRIVATE TASK NOTE"],
+      },
+    }));
+    const ownedTaskId = owned.task_id;
+    if (!ownedTaskId) throw new Error("Task ownership fixture did not create a task");
+
+    taskApiServerTransport.sessionId = "foreign-B";
+    const foreignStatus = await taskApiClient.callTool({ name: "task_status", arguments: { task_id: ownedTaskId } });
+    if (foreignStatus.structuredContent?.ok !== false || JSON.stringify(foreignStatus).includes("PRIVATE TASK NOTE")) {
+      throw new Error("foreign task_status read was not rejected without leaking task state");
+    }
+    const foreignUpdate = await taskApiClient.callTool({
+      name: "task_update",
+      arguments: { task_id: ownedTaskId, current_step: "FOREIGN MUTATION" },
+    });
+    if (foreignUpdate.structuredContent?.ok !== false) throw new Error("foreign task_update mutation was accepted");
+    const foreignComplete = await taskApiClient.callTool({ name: "task_complete", arguments: { task_id: ownedTaskId } });
+    if (foreignComplete.structuredContent?.ok !== false) throw new Error("foreign task_complete mutation was accepted");
+    const foreignList = data(await taskApiClient.callTool({ name: "task_list", arguments: {} }));
+    if (foreignList.tasks.some((task) => task.id === ownedTaskId || task.task_id === ownedTaskId)) {
+      throw new Error("foreign task_list exposed an owned task");
+    }
+
+    const foreignWrite = await taskApiClient.callTool({
+      name: "write_file",
+      arguments: { path: path.join(taskApiWorkspace, "foreign-write.txt"), content: "foreign\n" },
+    });
+    data(foreignWrite);
+    const foreignContext = foreignWrite.structuredContent?.data?.harness_context;
+    if (foreignContext?.task || (foreignContext?.recent_evidence?.length ?? 0) > 0) {
+      throw new Error("foreign result pipeline leaked the owner's task or evidence");
+    }
+
+    taskApiServerTransport.sessionId = undefined;
+    const noSessionStatus = await taskApiClient.callTool({ name: "task_status", arguments: { task_id: ownedTaskId } });
+    if (noSessionStatus.structuredContent?.ok !== false) throw new Error("no-session task_status read was accepted");
+    const noSessionUpdate = await taskApiClient.callTool({
+      name: "task_update",
+      arguments: { task_id: ownedTaskId, current_step: "NO SESSION MUTATION" },
+    });
+    if (noSessionUpdate.structuredContent?.ok !== false) throw new Error("no-session task_update mutation was accepted");
+    const noSessionComplete = await taskApiClient.callTool({ name: "task_complete", arguments: { task_id: ownedTaskId } });
+    if (noSessionComplete.structuredContent?.ok !== false) throw new Error("no-session task_complete mutation was accepted");
+    const noSessionList = data(await taskApiClient.callTool({ name: "task_list", arguments: {} }));
+    if (noSessionList.tasks.some((task) => task.id === ownedTaskId || task.task_id === ownedTaskId)) {
+      throw new Error("no-session task_list exposed an owned task");
+    }
+
+    taskApiServerTransport.sessionId = "transport-owner-A";
+    const ownerStatus = data(await taskApiClient.callTool({ name: "task_status", arguments: { task_id: ownedTaskId } }));
+    if (ownerStatus.task.current_step !== "Keep private state isolated" || ownerStatus.task.notes[0] !== "PRIVATE TASK NOTE") {
+      throw new Error("foreign/no-session Task API calls mutated the owner task");
+    }
+    if (ownerStatus.task.recent_events.some((event) => event.paths?.some((item) => item.endsWith("foreign-write.txt")))) {
+      throw new Error("foreign observation was recorded on the owner task");
+    }
+  } finally {
+    await taskApiClient?.close().catch(() => {});
+    await taskApiServer?.close().catch(() => {});
+    if (previousProfile === undefined) delete process.env.CHATGPT_TOOL_PROFILE;
+    else process.env.CHATGPT_TOOL_PROFILE = previousProfile;
+  }
 
   console.log(`agent-harness: 30-tool slim (${toolsListBytes} bytes), Goal Mode, compact task tracking, automatic observations, command logs, and background logs OK`);
 } finally {

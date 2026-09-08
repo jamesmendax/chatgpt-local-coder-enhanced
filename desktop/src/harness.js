@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const paths = require("./paths");
 const configStore = require("./config");
+const { resolveTunnelProxy, applyTunnelProxy } = require("./tunnel-proxy");
 
 /** 去掉 Electron 自身注入的变量，避免污染子进程。 */
 function baseEnv() {
@@ -107,7 +108,8 @@ function writeTunnelProfile(config) {
   return file;
 }
 
-function tunnelSpawnSpec(config, apiKey, subcommand = "run") {
+async function tunnelSpawnSpec(config, apiKey, subcommand = "run", proxyOptions) {
+  const proxyInfo = await resolveTunnelProxy(config, proxyOptions);
   const profile = writeTunnelProfile(config);
   const env = baseEnv();
   // Tunnel-client authenticates with its own profile/API key.  Do not let it
@@ -122,7 +124,9 @@ function tunnelSpawnSpec(config, apiKey, subcommand = "run") {
   const args = subcommand === "doctor"
     ? ["doctor", "--profile-file", profile, "--explain"]
     : ["run", "--profile-file", profile];
+  applyTunnelProxy(env, args, proxyInfo);
   return {
+    proxyInfo,
     command: paths.tunnelClientPath(),
     args,
     cwd: paths.runtimeDir(),

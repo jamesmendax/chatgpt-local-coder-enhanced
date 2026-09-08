@@ -31,6 +31,9 @@ const {
   getRuntimeScope,
 } = await import("../dist/lib/runtime-scope.js");
 const {
+  runWithMcpRequestIdentity,
+} = await import("../dist/lib/mcp-request-identity.js");
+const {
   createMcpServer,
   getMcpServerHarnessRuntime,
 } = await import("../dist/server-factory.js");
@@ -163,6 +166,127 @@ async function verifyGatewayBehavior() {
   assert.equal(traces[1].deadlineAt, 123456789);
   assert.equal(JSON.stringify(traces).includes("SECRET_ARGUMENT_PATH"), false, "trace leaked tool arguments");
 
+  const workflowExtra = {
+    ...extra,
+    sessionId: "ephemeral-transport-session",
+    requestInfo: {
+      headers: {
+        "X-Client-Request-Id": "wfr_01abcDEF234/command_7",
+      },
+    },
+  };
+  await gateway.invoke("read_text_file", [args, workflowExtra]);
+  assert.equal(
+    scopeSeen.mcpSessionId,
+    "wfr_01abcDEF234",
+    "stable tunnel workflow id did not override ephemeral transport session"
+  );
+
+  const openAiConversation = "opaque-openai-conversation-fixture";
+  await gateway.invoke("read_text_file", [args, {
+    ...extra,
+    sessionId: "ephemeral-openai-one",
+    _meta: { "openai/session": openAiConversation },
+  }]);
+  const derivedOpenAiConversation = scopeSeen.mcpSessionId;
+  assert.match(derivedOpenAiConversation, /^oai_conv_[0-9a-f]{32}$/);
+  assert.equal(derivedOpenAiConversation.includes(openAiConversation), false, "raw OpenAI conversation id leaked into runtime scope");
+  await gateway.invoke("read_text_file", [args, {
+    ...extra,
+    sessionId: "ephemeral-openai-two",
+    _meta: { "openai/session": openAiConversation },
+  }]);
+  assert.equal(scopeSeen.mcpSessionId, derivedOpenAiConversation, "documented openai/session identity drifted across transports");
+
+  const arbitraryClientRequestExtra = {
+    ...extra,
+    sessionId: "transport-fallback",
+    requestInfo: { headers: { "x-client-request-id": "arbitrary-request-id" } },
+  };
+  await gateway.invoke("read_text_file", [args, arbitraryClientRequestExtra]);
+  assert.equal(
+    scopeSeen.mcpSessionId,
+    "transport-fallback",
+    "arbitrary client request id must not replace MCP transport session identity"
+  );
+
+  // A connector may rotate the ephemeral MCP transport while retaining one
+  // workflow id. The documented header grammar must keep both calls in the
+  // same ownership scope; malformed or missing headers must remain fail-closed
+  // on the transport identity.
+  const stableWorkflowHeader = "wfr_stableWorkflow123/command_1";
+  await gateway.invoke("read_text_file", [args, {
+    ...extra,
+    sessionId: "ephemeral-transport-one",
+    requestInfo: { headers: { "x-request-id": stableWorkflowHeader } },
+  }]);
+  assert.equal(scopeSeen.mcpSessionId, "wfr_stableWorkflow123");
+  await gateway.invoke("read_text_file", [args, {
+    ...extra,
+    sessionId: "ephemeral-transport-two",
+    requestInfo: { headers: { "x-request-id": stableWorkflowHeader.replace("command_1", "command_2") } },
+  }]);
+  assert.equal(scopeSeen.mcpSessionId, "wfr_stableWorkflow123", "stable workflow identity drifted across ephemeral transports");
+
+  // Some real Web connector paths preserve the stable workflow header on the
+  // raw HTTP request but the SDK callback omits requestInfo.headers. The outer
+  // request identity must still override an ephemeral transport UUID.
+  await runWithMcpRequestIdentity(
+    { "x-client-request-id": "wfr_outerRequest456/command_1" },
+    "outer-transport-one",
+    () => gateway.invoke("read_text_file", [args, {
+      ...extra,
+      sessionId: "ephemeral-sdk-one",
+      requestInfo: { headers: {} },
+    }])
+  );
+  assert.equal(scopeSeen.mcpSessionId, "wfr_outerRequest456", "raw HTTP workflow identity did not reach invocation scope");
+  await runWithMcpRequestIdentity(
+    { "x-request-id": "wfr_outerRequest456/command_2" },
+    "outer-transport-two",
+    () => gateway.invoke("read_text_file", [args, {
+      ...extra,
+      sessionId: "ephemeral-sdk-two",
+      requestInfo: { headers: {} },
+    }])
+  );
+  assert.equal(scopeSeen.mcpSessionId, "wfr_outerRequest456", "outer request workflow identity drifted across transports");
+
+  await runWithMcpRequestIdentity(
+    { "x-openai-session": "opaque-header-conversation-fixture" },
+    "outer-openai-transport-one",
+    () => gateway.invoke("read_text_file", [args, {
+      ...extra,
+      sessionId: "ephemeral-header-sdk-one",
+      requestInfo: { headers: {} },
+    }])
+  );
+  const derivedHeaderConversation = scopeSeen.mcpSessionId;
+  assert.match(derivedHeaderConversation, /^oai_conv_[0-9a-f]{32}$/);
+  await runWithMcpRequestIdentity(
+    { "x-openai-session": "opaque-header-conversation-fixture" },
+    "outer-openai-transport-two",
+    () => gateway.invoke("read_text_file", [args, {
+      ...extra,
+      sessionId: "ephemeral-header-sdk-two",
+      requestInfo: { headers: {} },
+    }])
+  );
+  assert.equal(scopeSeen.mcpSessionId, derivedHeaderConversation, "x-openai-session fallback drifted across transports");
+
+  await gateway.invoke("read_text_file", [args, {
+    ...extra,
+    sessionId: "transport-malformed-workflow",
+    requestInfo: { headers: { "x-client-request-id": "wfr_not-a-valid-workflow/command_1" } },
+  }]);
+  assert.equal(scopeSeen.mcpSessionId, "transport-malformed-workflow", "malformed workflow header must not override transport identity");
+  await gateway.invoke("read_text_file", [args, {
+    ...extra,
+    sessionId: "transport-missing-workflow",
+    requestInfo: { headers: {} },
+  }]);
+  assert.equal(scopeSeen.mcpSessionId, "transport-missing-workflow", "missing workflow header must use transport identity");
+
   const firstInvocationId = traces[0].invocationId;
   traces.length = 0;
   controller.abort();
@@ -269,7 +393,7 @@ async function verifyConfiguredServerGateway() {
   const server = createMcpServer(workspace, 30_000, [workspace], true, manager);
   const runtime = getMcpServerHarnessRuntime(server);
   assert.ok(runtime, "server did not retain its harness runtime");
-  assert.equal(runtime.registry.list().length, 27, "effective slim native registry changed");
+    assert.equal(runtime.registry.list().length, 30, "effective slim native registry changed");
 
   const client = new Client({ name: "f1-gateway-test", version: "1" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -297,9 +421,26 @@ async function verifyConfiguredServerGateway() {
     assert.equal(nativeIds[0], nativeIds[1], "native trace correlation changed between start and success");
     assert.equal(nativeLogs.some((line) => line.includes(fixture)), false, "server trace leaked tool arguments");
 
+    const rawSeparatorToolName = "raw\u2028separator\u2029tool";
+    manager.tools = [{ ...manager.tools[0], name: rawSeparatorToolName }];
+    await refreshProxiedTools(server, manager);
+    const rawSeparatorResult = await client.callTool({
+      name: `f1__${rawSeparatorToolName}`,
+      arguments: { message: "gateway" },
+    });
+    assert.equal(rawSeparatorResult.structuredContent.marker, "echo:gateway");
+    const rawSeparatorLogs = harnessLogs.filter((line) => line.includes("tool=f1__raw separator tool"));
+    assert.equal(rawSeparatorLogs.length, 2, "Unicode line separators were not normalized in invocation traces");
+    assert.equal(
+      rawSeparatorLogs.some((line) => line.includes("\u2028") || line.includes("\u2029")),
+      false,
+      "invocation traces emitted raw Unicode line separators"
+    );
+
+    manager.tools = [{ ...manager.tools[0], name: "echo" }];
     await refreshProxiedTools(server, manager);
     assert.equal(runtime.registry.get("f1__echo")?.source, "upstream");
-    assert.equal(runtime.registry.list().length, 28, "dynamic tool was not merged into effective registry");
+    assert.equal(runtime.registry.list().length, 31, "dynamic tool was not merged into effective registry");
     const proxyResult = await client.callTool({
       name: "f1__echo",
       arguments: { message: "gateway" },
@@ -315,7 +456,7 @@ async function verifyConfiguredServerGateway() {
     manager.tools = [];
     await refreshProxiedTools(server, manager);
     assert.equal(runtime.registry.get("f1__echo"), undefined, "removed proxy remained in effective registry");
-    assert.equal(runtime.registry.list().length, 27);
+    assert.equal(runtime.registry.list().length, 30);
     const listed = await client.listTools();
     assert.equal(listed.tools.some((tool) => tool.name === "f1__echo"), false);
 

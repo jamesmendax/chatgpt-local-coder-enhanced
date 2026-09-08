@@ -36,13 +36,13 @@ export const GOAL_GROUNDING_NOTE =
   "Grounding: report only what tool results and verified evidence actually establish; mark anything unverified as unverified.";
 
 export const GOAL_WATCHDOG_POLICY =
-  "Goal watchdog = goal-scoped fallback alerting, not the execution loop. Active goal turns it on; pause/complete/cancel/no-goal turns it off; MCP exit terminates it. It never grants permission to stop and it does not auto-resume ChatGPT Web. During normal Goal execution, do not manually run watchdog start/stop/status scripts; use goal actions. Operator scripts are only for explicit user-requested control or debugging.";
+  "Goal watchdog = goal-scoped fallback alerting, not the execution loop. Active goal turns it on; pause/complete/cancel/no-goal turns it off; MCP exit terminates it. It never grants permission to stop and it does not auto-resume ChatGPT Web. During normal Goal execution, do not manually run watchdog scripts; use goal actions. Operator scripts are only for explicit user-requested control or debugging.";
 
 export const GOAL_CONTINUATION_CONTRACT =
-  "Active Goal = continuous execution. After goal(action=create) or resume, keep using tools in the same assistant turn until completion; a progress update is a checkpoint, not a stop condition. Active Goal SUPERSEDES generic progress-reporting, pacing, and check-in rules: intermediate progress belongs in task_state, not a user reply. Yield only for a verified blocker requiring user-only input, approval, credentials, or physical action (record task_state(checkpoint, blocked_reason)); or an explicit goal pause/cancel/completion. Never ask permission for work you can already do or present a plan instead of executing it. If the user sends a message mid-goal, handle the instruction and keep executing unless they explicitly pause, cancel, or replace the goal. When every criterion passes, immediately call goal(action=complete); then complete any active durable task and reply only after DELIVERABLE_READY. The Goal watchdog is lifecycle-managed fallback alerting: active goal turns it on, pause/complete/cancel/no-goal turns it off, and MCP exit terminates it. The watchdog never grants permission to stop and does not auto-resume ChatGPT Web; during normal Goal execution do not manually run watchdog scripts — use goal actions. Operator watchdog scripts are only for explicit user-requested control or debugging.";
+  "GoalRun controls continuous execution. Progress is a checkpoint, not a stop condition. Follow the current state policy: continue tools while RUNNING, wait only for an explicit bounded wait or verified user-only blocker, and finalize only after every criterion is confirmed by typed evidence. launch_ack never verifies completion.";
 
 export const GOAL_CONTINUATION_SNAPSHOT =
-  "Active Goal: continue tool calls until completion or a verified user-only blocker; progress is a checkpoint, not a stop condition. Goal actions own the watchdog lifecycle. Watchdog = fallback alert only, never permission to stop and never Web auto-resume. Do not run watchdog scripts during normal agent execution.";
+  "Follow the current GoalRun state. Progress is a checkpoint, not a stop condition. Continue only while RUNNING; respect bounded waits; finalize only with typed evidence. launch_ack is never completion evidence.";
 
 export type GoalMutationOptions = { expectedRevision?: number };
 
@@ -111,9 +111,40 @@ function projectSlug(workspaceRoot: string): string {
   return createHash("sha256").update(path.resolve(workspaceRoot)).digest("hex").slice(0, 12);
 }
 
-function goalPath(workspaceRoot: string): string {
+// Session isolation: when a session id is present, the goal lives in a
+// per-session shard so concurrent ChatGPT windows never supersede each other.
+// The workspace-global goal.json remains the compatibility/discovery
+// projection for session-less clients and cross-turn continuation.
+function goalShardDir(workspaceRoot: string, sessionId?: string): string {
   const base = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
-  return path.join(base, "projects", projectSlug(workspaceRoot), "goal.json");
+  const projectDir = path.join(base, "projects", projectSlug(workspaceRoot));
+  return sessionId ? path.join(projectDir, "sessions", sessionId) : projectDir;
+}
+
+function goalPath(workspaceRoot: string, sessionId?: string): string {
+  return path.join(goalShardDir(workspaceRoot, sessionId), "goal.json");
+}
+
+// Sanitize a session id for safe use as a single path segment.
+function sessionSegment(sessionId?: string): string | undefined {
+  if (!sessionId) return undefined;
+  const clean = sessionId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128);
+  return clean || undefined;
+
+}
+
+/**
+ * Persist a goal to its authoritative location plus the global projection.
+ * A goal owned by a session lives in that session's shard; the workspace-global
+ * goal.json is also refreshed so session-less clients and cross-turn
+ * continuation keep working. Unbound (legacy) goals only write the global path.
+ */
+async function writeGoalState(workspaceRoot: string, goal: DurableGoal): Promise<void> {
+  const shard = sessionSegment(goal.owner_session);
+  if (shard) {
+    await atomicWriteJson(goalPath(workspaceRoot, shard), goal);
+  }
+  await atomicWriteJson(goalPath(workspaceRoot), goal);
 }
 
 function cleanString(value: unknown, max = 1000): string | null {
@@ -220,8 +251,8 @@ function currentSessionId(): string | undefined {
   return getRuntimeScope()?.mcpSessionId;
 }
 
-function assertGoalAccessibleBySession(goal: DurableGoal, sessionId?: string): void {
-  if (goal.owner_session && sessionId && goal.owner_session !== sessionId) {
+export function assertGoalAccessibleBySession(goal: DurableGoal, sessionId?: string): void {
+  if (goal.owner_session && goal.owner_session !== sessionId) {
     throw new Error(
       `This goal belongs to a different ChatGPT window (session ${goal.owner_session.slice(0, 8)}…). ` +
       `Manage it from that window, or call goal(action=bind) in this window to adopt it.`
@@ -229,23 +260,152 @@ function assertGoalAccessibleBySession(goal: DurableGoal, sessionId?: string): v
   }
 }
 
+export interface GoalTakeoverCandidate {
+  goal_id: string;
+  status: GoalStatus;
+  revision: number;
+  owner_session_hint: string | null;
+}
+
+export async function getGoalTakeoverCandidate(
+  workspaceRoot: string,
+  targetSession?: string
+): Promise<GoalTakeoverCandidate | null> {
+  const global = await readGoalFile(goalPath(workspaceRoot));
+  if (
+    !global ||
+    !global.owner_session ||
+    global.owner_session === targetSession ||
+    (global.status !== "active" && global.status !== "paused")
+  ) {
+    return null;
+  }
+  return {
+    goal_id: global.id,
+    status: global.status,
+    revision: global.revision,
+    owner_session_hint: `${global.owner_session.slice(0, 8)}…`,
+  };
+}
+
+export function goalTakeoverToken(
+  workspaceRoot: string,
+  candidate: GoalTakeoverCandidate,
+  targetSession: string
+): string {
+  return createHash("sha256")
+    .update(
+      [
+        path.resolve(workspaceRoot),
+        candidate.goal_id,
+        String(candidate.revision),
+        candidate.owner_session_hint ?? "",
+        targetSession,
+        "goal-takeover-v1",
+      ].join("\0")
+    )
+    .digest("hex")
+    .slice(0, 32);
+}
+
+export async function getGoalOwnerSession(workspaceRoot: string): Promise<string | undefined> {
+  const global = await readGoalFile(goalPath(workspaceRoot));
+  return global?.owner_session;
+}
+
 export function resolveGoalForSession(workspaceRoot: string, sessionId?: string): Promise<DurableGoal | null> {
   return getGoal(workspaceRoot).then((goal) => (goal && goalVisibleToSession(goal, sessionId) ? goal : null));
 }
 
-export async function getGoal(workspaceRoot: string): Promise<DurableGoal | null> {
+async function readGoalFile(filePath: string): Promise<DurableGoal | null> {
+  let rawText: string;
   try {
-    const raw = JSON.parse(await fs.readFile(goalPath(workspaceRoot), "utf-8")) as DurableGoal;
+    rawText = await fs.readFile(filePath, "utf-8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return null;
+    throw new Error(`GOAL_STATE_UNREADABLE: cannot read ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    const raw = JSON.parse(rawText) as DurableGoal;
     return normalizeGoal(raw);
   } catch (error) {
-    // ENOENT = no goal yet (normal). Anything else means the state file is
-    // unreadable/corrupt — visible in logs, never a silent "no goal".
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT") {
-      console.warn(`[goal] goal.json unreadable (${code ?? "error"}): treating as no goal until it is fixed`);
-    }
+    throw new Error(`GOAL_STATE_UNREADABLE: invalid goal state in ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/**
+ * Resolve the active goal for the current runtime session.
+ * Reads the per-session shard first (session isolation); falls back to the
+ * workspace-global compatibility projection for session-less clients and
+ * cross-turn continuation. Pass an explicit sessionId to read a specific
+ * shard; omit to use the current runtime scope.
+ */
+export async function getGoal(workspaceRoot: string, sessionId?: string): Promise<DurableGoal | null> {
+  const effective = sessionSegment(sessionId ?? currentSessionId());
+  if (effective) {
+    // Session shard is authoritative for this window.
+    const sharded = await readGoalFile(goalPath(workspaceRoot, effective));
+    if (sharded) return sharded;
+    // Fall back to the global projection ONLY when it is visible to this
+    // session (unbound legacy goal, or one this window owns). A global goal
+    // owned by a different window must never leak into this window's context.
+    const global = await readGoalFile(goalPath(workspaceRoot));
+    if (global && goalVisibleToSession(global, effective)) return global;
     return null;
   }
+  return readGoalFile(goalPath(workspaceRoot));
+}
+
+/**
+ * Compatibility projection writer used only after GoalRun has committed an
+ * authoritative transition. It never invents a new revision itself.
+ */
+export async function writeGoalRunProjection(
+  workspaceRoot: string,
+  projection: DurableGoal,
+  options: { expectedCurrentRevision: number; operation?: string }
+): Promise<DurableGoal> {
+  return withGoalLock(workspaceRoot, async () => {
+    const current = await getGoal(workspaceRoot);
+    if (!current) throw new Error("No legacy goal projection exists for this workspace.");
+    assertGoalAccessibleBySession(current, currentSessionId());
+    if (current.id !== projection.id) {
+      throw new Error(
+        `GOAL_RUN_PROJECTION_MISMATCH: current goal is ${current.id}, projection is ${projection.id}.`
+      );
+    }
+    if (current.revision !== options.expectedCurrentRevision) {
+      throw new Error(
+        `GOAL_STALE_REVISION: goal revision is ${current.revision}, but ${options.expectedCurrentRevision} was expected. Re-read the goal and retry.`
+      );
+    }
+    if (!Number.isInteger(projection.revision) || projection.revision <= current.revision) {
+      throw new Error(
+        `GOAL_RUN_PROJECTION_REVISION: projection revision ${projection.revision} must be newer than ${current.revision}.`
+      );
+    }
+    // Keep unknown top-level compatibility fields. Older/newer readers may
+    // attach metadata that this version does not understand; projection
+    // normalization must not erase it during an authoritative GoalRun commit.
+    const next = {
+      ...(projection as unknown as Record<string, unknown>),
+      ...normalizeGoal(projection),
+    } as DurableGoal;
+    await writeGoalState(workspaceRoot, next);
+    notifyStateInvalidated(workspaceRoot);
+    await recordGoalChange(workspaceRoot, options.operation ?? "goal-run-projection", next);
+    if (next.status === "completed" && current.status !== "completed") {
+      try {
+        const summary = goalSummary(next);
+        await appendAutoMemory(
+          workspaceRoot,
+          `Goal completed (${summary.criteria_passed}/${summary.criteria_total} criteria): ${summary.objective.slice(0, 200)}`
+        );
+      } catch {}
+    }
+    return next;
+  });
 }
 
 export async function createGoal(
@@ -260,16 +420,12 @@ export async function createGoal(
 ): Promise<DurableGoal> {
   return withGoalLock(workspaceRoot, async () => {
     const ownerSession = currentSessionId();
+    const shard = sessionSegment(ownerSession);
+    // Session sharding: each ChatGPT window owns an independent goal slot.
+    // Conflict detection and supersede happen ONLY within this window's shard,
+    // so a goal held by another window never blocks or gets replaced from here.
     const existing = await getGoal(workspaceRoot);
     if (existing && (existing.status === "active" || existing.status === "paused")) {
-      if (existing.owner_session && ownerSession && existing.owner_session !== ownerSession) {
-        // Another ChatGPT window owns this goal: never mutate or supersede it
-        // from here — that is how the 5/9 criteria junk-drawer incident happened.
-        throw new Error(
-          `An active goal owned by ANOTHER ChatGPT window already exists (${existing.id}): "${existing.objective.slice(0, 120)}". ` +
-          `This window is unaffected by it. To take over the task, call goal(action=bind) in this window.`
-        );
-      }
       if (input.supersede) {
         // Atomic clean replacement: never append a new task's criteria onto an
         // old goal — that is how goal state becomes a junk drawer.
@@ -305,6 +461,11 @@ export async function createGoal(
       created_at: now,
       updated_at: now,
     };
+    // Write the session shard (authoritative for this window) and the global
+    // compatibility projection for session-less clients / cross-turn continuation.
+    if (shard) {
+      await atomicWriteJson(goalPath(workspaceRoot, shard), goal);
+    }
     await atomicWriteJson(goalPath(workspaceRoot), goal);
     notifyStateInvalidated(workspaceRoot);
     await recordGoalChange(workspaceRoot, "create", goal);
@@ -345,7 +506,7 @@ export async function updateGoal(
         throw new Error(`criterion "${criterion.name}" requires explicit user confirmation — use goal action=confirm instead of marking it passed`);
       }
     }
-    await atomicWriteJson(goalPath(workspaceRoot), next);
+    await writeGoalState(workspaceRoot, next);
     notifyStateInvalidated(workspaceRoot);
     await recordGoalChange(workspaceRoot, "update", next);
     return next;
@@ -366,7 +527,7 @@ async function setGoalStatus(workspaceRoot: string, status: GoalStatus, phase?: 
     ...(status === "completed" ? { completed_at: now } : {}),
   };
   if (status !== "completed") delete next.completed_at;
-  await atomicWriteJson(goalPath(workspaceRoot), next);
+  await writeGoalState(workspaceRoot, next);
   notifyStateInvalidated(workspaceRoot);
   await recordGoalChange(workspaceRoot, `status:${status}`, next);
   return next;
@@ -399,6 +560,7 @@ export async function cancelGoal(workspaceRoot: string, opts?: GoalMutationOptio
       throw new Error("Only an active or paused goal can be cancelled.");
     }
     assertGoalAccessibleBySession(goal, currentSessionId());
+    assertExpectedRevision(goal, opts);
     return setGoalStatus(workspaceRoot, "cancelled", "Cancelled");
   });
 }
@@ -466,7 +628,7 @@ export async function confirmGoalCriterion(
       revision: goal.revision + 1,
       updated_at: new Date().toISOString(),
     };
-    await atomicWriteJson(goalPath(workspaceRoot), next);
+    await writeGoalState(workspaceRoot, next);
     notifyStateInvalidated(workspaceRoot);
     await recordGoalChange(workspaceRoot, "confirm", next);
     const scope = await inferProjectScope(workspaceRoot, [next.objective, next.current_phase, ...next.constraints]);
@@ -484,14 +646,28 @@ export async function confirmGoalCriterion(
 /**
  * Cross-session adoption: a NEW ChatGPT conversation (new MCP session) binds
  * the existing goal to itself, moving the continuation signals and gates into
- * that window. Requires this window's session id; bumps revision. Does NOT
- * touch any durable task.
+ * that window. Requires this window's session id; bumps revision. This low-level
+ * store helper only mutates Goal state; the public `goal(action=bind)` tool
+ * preflights and migrates the paired session-scoped durable task around it.
  */
 export async function bindGoalToSession(workspaceRoot: string, opts?: GoalMutationOptions): Promise<DurableGoal> {
   return withGoalLock(workspaceRoot, async () => {
     const sessionId = currentSessionId();
     if (!sessionId) throw new Error("goal(action=bind) requires a ChatGPT session context (none available).");
-    const goal = await getGoal(workspaceRoot);
+    // Bind is an explicit cross-window adoption: it must read the global
+    // projection (the cross-turn continuation carrier) regardless of which
+    // window owns it — the per-session visibility filter would otherwise hide
+    // the very goal this window is trying to take over.
+    const goal = await readGoalFile(goalPath(workspaceRoot));
+    const destinationShard = sessionSegment(sessionId);
+    const destinationGoal = destinationShard
+      ? await readGoalFile(goalPath(workspaceRoot, destinationShard))
+      : null;
+    if (destinationGoal) {
+      throw new Error(
+        "This window already owns a goal. Complete or cancel it before taking over another window's goal."
+      );
+    }
     if (!goal || (goal.status !== "active" && goal.status !== "paused")) {
       throw new Error("No active or paused goal to bind in this workspace.");
     }
@@ -499,13 +675,19 @@ export async function bindGoalToSession(workspaceRoot: string, opts?: GoalMutati
       throw new Error("Goal is already bound to this window.");
     }
     assertExpectedRevision(goal, opts);
+    const previousShard = sessionSegment(goal.owner_session);
     const next: DurableGoal = {
       ...goal,
       owner_session: sessionId,
       revision: goal.revision + 1,
       updated_at: new Date().toISOString(),
     };
-    await atomicWriteJson(goalPath(workspaceRoot), next);
+    await writeGoalState(workspaceRoot, next);
+    // Remove the previous owner's shard so that window goes silent after the
+    // handover instead of keeping a stale copy of the adopted goal.
+    if (previousShard && previousShard !== sessionSegment(sessionId)) {
+      await fs.rm(goalPath(workspaceRoot, previousShard), { force: true }).catch(() => {});
+    }
     notifyStateInvalidated(workspaceRoot);
     await recordGoalChange(workspaceRoot, "bind", next);
     return next;
