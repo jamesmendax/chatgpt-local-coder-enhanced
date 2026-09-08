@@ -1,0 +1,16 @@
+{
+  "version": "0.1.2",
+  "record_kind": "historical-record-only",
+  "application_source_included": false,
+  "installer_attached": false,
+  "retained_artifact": {
+    "filename": "ChatGPT Web Harness-0.1.2-portable.exe",
+    "bytes": 94631477,
+    "pe_product_version": "0.1.2",
+    "pe_file_version": "0.1.2",
+    "sha256": "f41376bf7f80d3163f691491a28665aa4006056a931847a94b4da751c4198d9a"
+  },
+  "observed_without_execution": true,
+  "full_corresponding_source_snapshot_confirmed": false,
+  "notice": "Automatic source archives contain this historical record only, not application source. This record does not claim a new build, runtime test, or privacy review of the retained executable."
+}
