@@ -1,6 +1,6 @@
 # Security model
 
-ChatGPT Local Coder is intentionally a privileged local automation service. It can expose filesystem, shell, git, and related development operations through MCP. It should not be treated as a sandbox or as safe for untrusted clients.
+ChatGPT Web Harness is intentionally a privileged local automation service. It can expose filesystem, shell, git, and related development operations through MCP. It should not be treated as a sandbox or as safe for untrusted clients.
 
 ## Trust boundary
 

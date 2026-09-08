@@ -1,6 +1,6 @@
 # Windows desktop client
 
-The `desktop/` directory contains the Electron launcher for ChatGPT Local Coder Enhanced. It owns the setup form, encrypted local configuration, MCP/tunnel lifecycle, activity feeds, and Skill/plugin management. The MCP server remains the source of truth for tool behavior and Skill resolution.
+The `desktop/` directory contains the Electron launcher for ChatGPT Web Harness. It owns the setup form, encrypted local configuration, MCP/tunnel lifecycle, activity feeds, and Skill/plugin management. The MCP server remains the source of truth for tool behavior and Skill resolution.
 
 ## Build and test
 

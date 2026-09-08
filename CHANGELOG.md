@@ -1,6 +1,13 @@
 # Changelog
 
-All notable user-facing changes to ChatGPT Local Coder Enhanced are recorded here.
+All notable user-facing changes to ChatGPT Web Harness are recorded here.
+
+## Unreleased
+
+### Changed
+
+- Adopted **ChatGPT Web Harness** as the public product name while retaining the existing `jamesmendax/chatgpt-local-coder-enhanced` repository slug and release history.
+- Added canonical repository checks to the release workflow and release verification command to prevent publishing to a similarly named repository.
 
 ## 1.4.0 - 2026-09-06
 

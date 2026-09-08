@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible problem in ChatGPT Local Coder
+description: Report a reproducible problem in ChatGPT Web Harness
 title: "[Bug] "
 labels: ["bug"]
 body:

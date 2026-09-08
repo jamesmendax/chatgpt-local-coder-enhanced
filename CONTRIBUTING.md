@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve ChatGPT Local Coder.
+Thanks for helping improve ChatGPT Web Harness.
 
 ## Before you start
 

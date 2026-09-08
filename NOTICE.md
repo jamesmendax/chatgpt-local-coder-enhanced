@@ -4,7 +4,7 @@ This repository is derived from the open-source project [`hoangcoderr/chatgpt-lo
 
 The upstream project is distributed under the MIT License. Its original copyright notice is preserved in [LICENSE](LICENSE) and must remain with copies or substantial portions of the software.
 
-This enhanced fork is maintained by [@jamesmendax](https://github.com/jamesmendax) at [`jamesmendax/chatgpt-local-coder-enhanced`](https://github.com/jamesmendax/chatgpt-local-coder-enhanced).
+The maintained product is named **ChatGPT Web Harness** and remains hosted by [@jamesmendax](https://github.com/jamesmendax) at the existing [`jamesmendax/chatgpt-local-coder-enhanced`](https://github.com/jamesmendax/chatgpt-local-coder-enhanced) repository.
 
 This fork contains additional work and maintenance by jamesmendax and other contributors, including changes around:
 

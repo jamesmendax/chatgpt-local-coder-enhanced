@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="icon.png" alt="ChatGPT Local Coder Enhanced" width="96">
+<img src="icon.png" alt="ChatGPT Web Harness" width="96">
 
-# ChatGPT Local Coder Enhanced
+# ChatGPT Web Harness
 
 **Self-hosted MCP server for ChatGPT with local files, shell, git, checkpoints, direct attachment saving, and verified binary-file transfer.**
 
@@ -18,9 +18,9 @@
 > [!WARNING]
 > This server can read and write local files and execute shell commands. Treat the MCP endpoint as privileged remote access to your computer. Read [SECURITY.md](SECURITY.md) before exposing it through any tunnel.
 
-## About this fork
+## About this project
 
-This repository is the enhanced fork maintained by [@jamesmendax](https://github.com/jamesmendax) at [`jamesmendax/chatgpt-local-coder-enhanced`](https://github.com/jamesmendax/chatgpt-local-coder-enhanced). It is based on [`hoangcoderr/chatgpt-local-coder`](https://github.com/hoangcoderr/chatgpt-local-coder) and remains MIT licensed.
+ChatGPT Web Harness is maintained by [@jamesmendax](https://github.com/jamesmendax) in the existing [`jamesmendax/chatgpt-local-coder-enhanced`](https://github.com/jamesmendax/chatgpt-local-coder-enhanced) repository. The repository slug remains unchanged so existing clones, tags, Releases, and links continue to work. The project is based on [`hoangcoderr/chatgpt-local-coder`](https://github.com/hoangcoderr/chatgpt-local-coder) and remains MIT licensed.
 
 The enhanced branch adds and hardens direct ChatGPT attachment saving, ChatGPT web tool profiles, MCP session recovery, checkpoint/rewind support, verified binary-file transfer, file inspection, Windows dual-tunnel launchers, a portable Windows desktop client, and a safe Skill/plugin lifecycle. See [NOTICE.md](NOTICE.md) and [CHANGELOG.md](CHANGELOG.md).
 
@@ -32,7 +32,7 @@ ChatGPT Web
     | HTTPS / Secure MCP Tunnel
     v
 +---------------------------+
-| ChatGPT Local Coder       |
+| ChatGPT Web Harness      |
 | MCP server on localhost   |
 +-------------+-------------+
               |

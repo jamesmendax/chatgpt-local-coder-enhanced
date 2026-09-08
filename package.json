@@ -1,7 +1,7 @@
 {
-  "name": "chatgpt-local-coder-enhanced",
+  "name": "chatgpt-web-harness",
   "version": "1.4.0",
-  "description": "Enhanced self-hosted MCP server for ChatGPT with local filesystem, shell, git, checkpoints, direct attachment saving, and verified binary-file capabilities.",
+  "description": "ChatGPT Web Harness: a self-hosted MCP sidecar with local files, shell, git, checkpoints, direct attachment saving, and verified binary transfer.",
   "repository": {
     "type": "git",
     "url": "https://github.com/jamesmendax/chatgpt-local-coder-enhanced.git"
@@ -31,7 +31,9 @@
     "dev": "tsx watch src/index.ts",
     "tunnel": "cloudflared tunnel --url http://localhost:3000",
     "check:secrets": "node scripts/check-public-secrets.mjs",
-    "verify": "npm run check:secrets && npm run test:all"
+    "verify": "npm run check:secrets && npm run test:all",
+    "check:release-target": "node scripts/check-release-target.mjs",
+    "verify:release": "npm run verify && npm run check:release-target"
   },
   "keywords": [
     "mcp",

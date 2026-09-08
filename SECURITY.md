@@ -2,7 +2,7 @@
 
 ## Security model
 
-ChatGPT Local Coder is intentionally powerful. A connected MCP client can read and write local files, run shell commands, and use git according to the server's configured permissions. It is **not** a sandbox.
+ChatGPT Web Harness is intentionally powerful. A connected MCP client can read and write local files, run shell commands, and use git according to the server's configured permissions. It is **not** a sandbox.
 
 Treat access to the MCP endpoint as privileged access to the host machine.
 

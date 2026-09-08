@@ -2,7 +2,7 @@
 
 ## Product boundary
 
-ChatGPT Local Coder is a harness sidecar for ChatGPT Web over MCP and a network tunnel. It does not own the model request loop and will not implement or reserve an API-agent runtime, model-provider abstraction, model routing, or true LLM subagents.
+ChatGPT Web Harness is a sidecar for ChatGPT Web over MCP and a network tunnel. It does not own the model request loop and will not implement or reserve an API-agent runtime, model-provider abstraction, model routing, or true LLM subagents.
 
 The optimization target is the part of the agent system we can control:
 

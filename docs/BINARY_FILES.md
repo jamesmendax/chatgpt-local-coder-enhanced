@@ -1,6 +1,6 @@
 # Binary files and ChatGPT attachments
 
-ChatGPT Local Coder has two binary-transfer paths:
+ChatGPT Web Harness has two binary-transfer paths:
 
 1. `save_chatgpt_file` for a file attached to the current ChatGPT conversation.
 2. `read_file_base64` / `write_file_base64` for generic binary transfer when no ChatGPT attachment object is available.
