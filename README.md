@@ -1,5 +1,7 @@
 <div align="center">
 
+> **隔离预览版 v0.1.4-isolated.1**：此分支提供独立桌面版本。[下载 Release](https://github.com/jamesmendax/chatgpt-local-coder/releases/tag/v0.1.4-isolated.1) · [使用与验证说明](ISOLATED_VERSION.md)。下文的 3000/3001 端口属于通用 server 模式；桌面隔离版默认 3300/3301/8380。
+
 # ChatGPT Local Coder
 
 **Turn ChatGPT web into a local coding agent — a 27-tool web profile with Goal Mode, compact task state, shell evidence, git, and patches.**
@@ -44,7 +46,7 @@ No desktop app. No vendor lock-in. Run one Node process on your PC, expose it th
 | Session recovery | — | ✅ Auto-recover after server restart |
 | Long-task handoff | — | ✅ `task_state` checkpoints with failures, checks, files, and next actions |
 
-Built for **[ChatGPT Developer Mode](https://platform.openai.com/docs/guides/developer-mode)** with optimized tool annotations (fewer permission popups) and **[OpenAI Secure MCP Tunnel](https://platform.openai.com/docs/guides/secure-mcp-tunnel)** support (stable URL, no connector re-wiring every restart).
+Built for **[ChatGPT Developer Mode](https://platform.openai.com/docs/guides/developer-mode)** with truthful MCP ToolAnnotations, app-level permission control in ChatGPT, and **[OpenAI Secure MCP Tunnel](https://platform.openai.com/docs/guides/secure-mcp-tunnel)** support (stable URL, no connector re-wiring every restart).
 
 ## 🚀 Quick Start
 
@@ -119,7 +121,7 @@ Every message that should use local tools **must include the connector**. If you
 1. **Before sending:** **New chat** → **+** (tools) → **More** → enable **Local Coder** (connector stays on for that chat).
 2. **In the message:** type **`@`** and choose **Local Coder** (or your connector name) so it appears as a pill/chip above the input.
 
-Then send your prompt. You should see tool permission prompts or MCP activity — not a dead stream with no server log.
+Then send your prompt. You should see MCP activity — or a ChatGPT permission prompt if this app is configured to ask before that action — not a dead stream with no server log.
 
 Example prompts (after tagging):
 
@@ -128,7 +130,7 @@ Example prompts (after tagging):
 - *"Find all TODO comments with grep and summarize"*
 
 > **Tip:** After server updates or restarts → **Refresh** the connector and start a **new chat** (re-tag the connector).  
-> **Avoid** clicking **"Always allow"** on permission popups — it can reset the MCP session. Configure permissions in **Settings → Apps** instead.
+> For uninterrupted Goal execution on a trusted local harness, configure **this connector only** as **Allow all actions / Never ask** in **Settings → Apps**. Keep your global/default permission at the level you want for other apps.
 
 ## 🌐 Tunnel options
 
@@ -269,7 +271,6 @@ PORT=3000
 HOST=127.0.0.1
 MCP_TOKEN=                      # generate one — see below
 WORKSPACE_PATH=C:\Users\You\projects\my-app     # macOS: /Users/you/projects/my-app
-CHATGPT_AUTO_APPROVE=true
 CHATGPT_TOOL_PROFILE=slim
 SHELL_TIMEOUT=120
 MCP_SESSION_RECOVERY=true
@@ -287,7 +288,6 @@ OPENAI_TUNNEL_API_KEY=
 | `MCP_TOKEN` | *(empty)* | Secret in the endpoint path: `/mcp/<token>`. Empty = **no auth**. Generate: `node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"` |
 | `ADMIN_PORT` | `3001` | [Admin UI](#-admin-ui) port (localhost-only, always on). Change it if something else uses 3001 — Docker Desktop often does |
 | `ADMIN_TOKEN` | *(empty)* | Bearer token for the Admin UI. Empty = loopback check only |
-| `CHATGPT_AUTO_APPROVE` | `true` | Tool annotations to reduce ChatGPT popups |
 | `CHATGPT_TOOL_PROFILE` | `slim` | `slim` exposes 26 preferred web tools; `full` exposes the complete local catalog |
 | `MCP_SESSION_RECOVERY` | `true` | Auto-recover stale sessions after restart |
 | `SHELL_TIMEOUT` | `120` | Max seconds for `run_command` |
@@ -337,6 +337,31 @@ create or edit the real artifact
 
 `machine_blocking_issues` and runtime diagnostics are deliberately auxiliary. A clean renderer does **not** mean the artifact looks correct. Visual Review keeps acceptability separate from improvement potential: a version may be technically and semantically passable while still being worth another revision. The iteration policy is universal across images, SVG, web/UI, PDF, PPTX, and DOCX: `model_visual_iteration` reports the current iteration, the maximum of 5, whether the limit has been reached, and whether continuation is still required. Before iteration 5, `task_state` will not enter `DELIVERABLE_READY` while the model still identifies worthwhile visual improvement. At iteration 5 the autonomous improvement loop stops, but delivery still requires a passing semantic visual assessment, full required page coverage, a current source review, and no machine blocking issue. Multi-page artifacts are reviewed in consecutive batches; only pages whose full page images were actually returned to the model count toward coverage.
 
+## 🪟 Windows desktop launcher
+
+The optional `desktop/` launcher packages MCP, its production `node_modules`,
+and the tunnel client into portable, NSIS setup, and zip-style `win-unpacked`
+artifacts. Release artifacts intentionally contain **zero preinstalled Skills**
+(including the Harness workflow Skills); install a directory or zip from the
+Skills page, or use the shared MCP/Admin installer APIs. The launcher prepends
+a controlled `node.cmd` shim that forwards to Electron's embedded Node, so a
+clean Windows machine does not need a system Node installation.
+
+```powershell
+cd desktop
+npm install
+npm run test                 # isolated smoke, migration, and Node-shim checks
+npm run dist                 # local NSIS setup + portable artifacts
+```
+
+The Skills page keeps installed, external, project, and builtin sources
+separate. Installed and builtin enable/disable actions persist immediately;
+builtin files cannot be uninstalled. “重置为默认” only rewrites the two Skill/
+plugin profile files, while “卸载并清理数据” stops managed services and asks
+before deleting the desktop user-data directory. NSIS uses the same confirmation
+when removing the installed application. No packaging command pushes or
+publishes a release.
+
 ## 🖥️ Admin UI
 
 A local web console ships with the server. It starts **automatically** with `npm start` (same process, separate port) — there is no separate command and no on/off switch.
@@ -384,7 +409,7 @@ src/
 - **Transport:** MCP Streamable HTTP — `/mcp/<MCP_TOKEN>` and `/<MCP_TOKEN>` (or `/mcp` and `/` when `MCP_TOKEN` is empty)
 - **Session:** Stateful with auto-recovery when ChatGPT holds a stale session ID
 - **Output:** Structured JSON from every tool
-- **Web discovery:** 27 slim tools, about 22 KB in the verified local schema
+- **Web discovery:** 30 slim tools, including the Skill lifecycle API
 
 ## 🧪 Development
 
@@ -419,7 +444,7 @@ This server grants **full access to your machine** — files, shell, git. Only e
 | **"Error in message stream"** / **"Lỗi trong luồng tin nhắn"** right after *"Looking for tools"* — **no server log** | You did **not tag the connector**. New chat → **+** → **More** → enable connector, or type **`@Local Coder`** in the message. Then retry. |
 | **Resource not found** on tool call | Refresh connector + new chat. Server auto-recovers sessions — ensure latest build is running. |
 | **Connection failed** | Check `.\start.ps1` + tunnel are both running. URL must be HTTPS. |
-| **Permission popup every call** | Settings → Apps → set connector to *Ask before important changes*. Don't use popup "Always allow". |
+| **Permission popup interrupts Goal execution** | ChatGPT decides confirmation at the app-permission layer before the MCP callback runs. For a trusted local harness, set **only this connector** to *Allow all actions / Never ask*. ToolAnnotations are risk hints, not an approval bypass. |
 | **Tool blocked by OpenAI safety** | Not a server bug. Retry with `run_command` (response may include `run_command_fallback`). Affects `git_push`, `git_checkout`, `delete_directory` occasionally. |
 | **`stream canceled`** in tunnel log | Server/tunnel restarted mid-session → refresh connector, new chat. |
 | **Tunnel URL keeps changing** | Switch to OpenAI Secure Tunnel (`openai-tunnel.ps1`). |

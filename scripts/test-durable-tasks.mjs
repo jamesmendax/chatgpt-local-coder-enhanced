@@ -14,15 +14,18 @@ import {
   taskHandoff,
   updateDurableTask,
 } from "../dist/lib/durable-tasks.js";
+const { createRuntimeScope, getRuntimeScope, runWithRuntimeScope } = await import("../dist/lib/runtime-scope.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 const tmpHome = path.join(root, ".task-test-home");
 const workspace = path.join(root, ".task-test-workspace");
+const ownedWorkspace = path.join(root, ".task-test-owned-workspace");
 
 process.env.CODEX_HOME = tmpHome;
 await fs.rm(tmpHome, { recursive: true, force: true });
 await fs.mkdir(workspace, { recursive: true });
+await fs.mkdir(ownedWorkspace, { recursive: true });
 
 try {
   const created = await createDurableTask(workspace, {
@@ -86,6 +89,54 @@ try {
   const listed = await listDurableTasks(workspace, { status: "completed" });
   if (!listed.some((task) => task.id === created.id)) throw new Error("completed task missing from list");
 
+  // Compatibility regression: controlled resolution may provide the exact
+  // owner session outside RuntimeScope, while ambient/default tool paths stay
+  // fail-closed for foreign or missing sessions.
+  const ownerSession = "explicit-owner-session";
+  const ownerScope = createRuntimeScope(
+    { workspaceRoot: ownedWorkspace, projectRoots: [ownedWorkspace] },
+    { sessionId: ownerSession }
+  );
+  const owned = await runWithRuntimeScope(ownerScope, () => createDurableTask(ownedWorkspace, {
+    goal: "Verify explicit-session durable task resolution",
+    current_step: "Resolve without ambient RuntimeScope",
+  }));
+  if (getRuntimeScope() !== undefined || owned.owner_session !== ownerSession) {
+    throw new Error("owned task fixture leaked RuntimeScope or missed owner_session");
+  }
+  if ((await resolveDurableTask(ownedWorkspace, owned.id, ownerSession)).id !== owned.id) {
+    throw new Error("matching explicit session could not resolve an owned task by id");
+  }
+  if ((await resolveDurableTask(ownedWorkspace, undefined, ownerSession)).id !== owned.id) {
+    throw new Error("matching explicit session could not resolve its active owned task");
+  }
+  const explicitlyListed = await listDurableTasks(ownedWorkspace, { sessionId: ownerSession });
+  if (!explicitlyListed.some((task) => task.id === owned.id)) {
+    throw new Error("matching explicit session could not list its owned task");
+  }
+
+  let foreignRejected = false;
+  try {
+    await resolveDurableTask(ownedWorkspace, owned.id, "foreign-session");
+  } catch (error) {
+    foreignRejected = String(error).includes("different ChatGPT window");
+  }
+  if (!foreignRejected) throw new Error("foreign explicit session resolved an owned task");
+
+  let undefinedRejected = false;
+  try {
+    await resolveDurableTask(ownedWorkspace, owned.id);
+  } catch (error) {
+    undefinedRejected = String(error).includes("no current MCP session");
+  }
+  if (!undefinedRejected) throw new Error("undefined ambient session resolved an owned task");
+  if ((await listDurableTasks(ownedWorkspace, { sessionId: "foreign-session" })).some((task) => task.id === owned.id)) {
+    throw new Error("foreign explicit session listed an owned task");
+  }
+  if ((await listDurableTasks(ownedWorkspace)).some((task) => task.id === owned.id)) {
+    throw new Error("undefined ambient session listed an owned task");
+  }
+
   const staleWorkspace = path.join(root, ".task-test-stale-workspace");
   const staleDir = durableTaskDir(staleWorkspace);
   await fs.mkdir(staleDir, { recursive: true });
@@ -103,8 +154,9 @@ try {
   }
   if (stalePointerExists) throw new Error("expired active task pointer file was not removed");
 
-  console.log(`OK durable task ${created.id} persisted, blocked early completion, completed after blocking checks, and expired stale pointers`);
+  console.log(`OK durable task ${created.id} lifecycle, explicit-session resolution, ownership isolation, and stale pointer expiry`);
 } finally {
   await fs.rm(tmpHome, { recursive: true, force: true });
   await fs.rm(workspace, { recursive: true, force: true });
+  await fs.rm(ownedWorkspace, { recursive: true, force: true });
 }

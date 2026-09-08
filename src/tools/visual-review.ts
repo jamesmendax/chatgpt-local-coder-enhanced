@@ -3,7 +3,12 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { toolAnnotations } from "../lib/tool-annotations.js";
 import { toolError, toolResult } from "../lib/tool-result.js";
 import { performVisualReview } from "../lib/visual-harness.js";
-import { assessVisualReviewRecord, getVisualReviewFreshness, MAX_VISUAL_ITERATIONS } from "../lib/visual-review-state.js";
+import {
+  assessVisualReviewRecord,
+  critiqueVisualReviewRecord,
+  getVisualReviewFreshness,
+  MAX_VISUAL_ITERATIONS,
+} from "../lib/visual-review-state.js";
 
 const focusSchema = z.object({
   label: z.string().max(120).optional(),
@@ -15,6 +20,15 @@ const focusSchema = z.object({
   width: z.number().positive().optional(),
   height: z.number().positive().optional(),
   unit: z.enum(["ratio", "px"]).optional().default("ratio"),
+});
+
+const qualityScoresSchema = z.object({
+  task_fidelity: z.number().min(1).max(5),
+  composition: z.number().min(1).max(5),
+  visual_hierarchy: z.number().min(1).max(5),
+  coherence: z.number().min(1).max(5),
+  craft_precision: z.number().min(1).max(5),
+  professional_readiness: z.number().min(1).max(5),
 });
 
 function visualReviewResult(data: Record<string, unknown>, images: Array<{ bytes: Buffer; mime_type: string; label: string; path: string }>) {
@@ -40,20 +54,27 @@ export function registerVisualReviewTool(server: McpServer, workspaceRoot: strin
   server.registerTool(
     "visual_review",
     {
-      title: "Universal Visual Review",
+      title: "Visual Review",
       description:
-        `Render an image, SVG, HTML/URL, PDF, PPTX, or DOCX and return the real rendered pixels directly to the model. Machine diagnostics are auxiliary only. After inspecting the returned full render/page images, call action=assess with the same review_id. Assessment records whether the artifact is acceptable and whether another improvement iteration is worthwhile. This is one universal visual loop for every supported artifact kind, with a hard autonomous cap of ${MAX_VISUAL_ITERATIONS} visual iterations.`,
+        `Render to pixels. Completion: review -> critique -> assess; server quality gate owns PASS. Max ${MAX_VISUAL_ITERATIONS} versions.`,
       inputSchema: {
-        action: z.enum(["review", "status", "assess"]).optional().default("review"),
+        action: z.enum(["review", "status", "critique", "assess"]).optional().default("review"),
         target: z.string().min(1).optional(),
-        review_id: z.string().uuid().optional(),
+        review_id: z.string().min(1).optional(),
+        quality_bar: z.enum(["draft", "standard", "polished"]).optional(),
         verdict: z.enum(["pass", "fail"]).optional(),
         inspected_full_render: z.boolean().optional(),
         issues: z.array(z.string().min(1).max(1000)).max(30).optional(),
+        first_impression: z.enum(["rough", "acceptable", "polished"]).optional(),
+        delivery_recommendation: z.enum(["reject", "revise", "accept"]).optional(),
+        quality_scores: qualityScoresSchema.optional(),
+        critical_issues: z.array(z.string()).max(30).optional(),
+        major_issues: z.array(z.string()).max(30).optional(),
+        minor_issues: z.array(z.string()).max(30).optional(),
         comparison: z.enum(["improved", "unchanged", "regressed", "not_compared"]).optional(),
         strengths: z.array(z.string().min(1).max(1000)).max(30).optional(),
         improvement_opportunities: z.array(z.string().min(1).max(1000)).max(30).optional(),
-        further_improvement_worthwhile: z.boolean().optional().describe(`Judge the current rendered artifact on its own merits, not merely by whether it improved versus the prior version. Set true whenever a clear, worthwhile visual improvement remains. Set false only when another revision would be low-value. Be truthful even on iteration ${MAX_VISUAL_ITERATIONS}; the harness applies the hard iteration cap separately.`),
+        further_improvement_worthwhile: z.boolean().optional(),
         assessment_summary: z.string().max(4000).optional(),
         kind: z.enum(["auto", "image", "svg", "html", "url", "pdf", "pptx", "docx"]).optional().default("auto"),
         output_dir: z.string().optional(),
@@ -61,7 +82,7 @@ export function registerVisualReviewTool(server: McpServer, workspaceRoot: strin
         height: z.number().int().min(240).max(1800).optional(),
         pages: z.array(z.number().int().min(1).max(500)).max(12).optional(),
         focus: z.array(focusSchema).max(8).optional(),
-        compare_to: z.string().optional().describe("Prior review_id or local preview image"),
+        compare_to: z.string().optional(),
         full_page: z.boolean().optional().default(false),
         max_images: z.number().int().min(1).max(12).optional().default(12),
         timeout_ms: z.number().int().min(1000).max(120000).optional().default(30000),
@@ -69,12 +90,53 @@ export function registerVisualReviewTool(server: McpServer, workspaceRoot: strin
       },
       annotations: toolAnnotations("command"),
     },
-    async ({ action, target, review_id, verdict, inspected_full_render, issues, comparison, strengths, improvement_opportunities, further_improvement_worthwhile, assessment_summary, ...options }) => {
+    async ({ action, target, review_id, quality_bar, verdict, inspected_full_render, issues, first_impression, delivery_recommendation, quality_scores, critical_issues, major_issues, minor_issues, comparison, strengths, improvement_opportunities, further_improvement_worthwhile, assessment_summary, ...options }) => {
       try {
         if (action === "status") {
           if (!review_id) throw new Error("visual_review action=status requires review_id");
           const freshness = await getVisualReviewFreshness(workspaceRoot, review_id);
           return toolResult("visual_review", { action, ...freshness }, { summary: freshness.reason });
+        }
+        if (action === "critique") {
+          if (!review_id) throw new Error("visual_review action=critique requires review_id");
+          if (inspected_full_render !== true) {
+            throw new Error("visual_review action=critique requires inspected_full_render=true after the model has actually inspected every returned full render/page image.");
+          }
+          if (!first_impression) throw new Error("visual_review action=critique requires first_impression=rough|acceptable|polished");
+          if (!delivery_recommendation) throw new Error("visual_review action=critique requires delivery_recommendation=reject|revise|accept");
+          if (!quality_scores) throw new Error("visual_review action=critique requires quality_scores across all universal quality dimensions");
+          if (typeof further_improvement_worthwhile !== "boolean") {
+            throw new Error("visual_review action=critique requires further_improvement_worthwhile=true|false");
+          }
+          const record = await critiqueVisualReviewRecord(workspaceRoot, review_id, {
+            inspected_full_render: true,
+            first_impression,
+            delivery_recommendation,
+            quality_scores,
+            critical_issues,
+            major_issues,
+            minor_issues,
+            strengths,
+            improvement_opportunities,
+            further_improvement_worthwhile,
+            summary: assessment_summary,
+          });
+          const freshness = await getVisualReviewFreshness(workspaceRoot, review_id);
+          return toolResult("visual_review", {
+            action,
+            review_id,
+            target: record.target,
+            kind: record.kind,
+            quality_bar: record.quality_bar ?? "standard",
+            source_signature: record.source_signature,
+            model_visual_critique: record.model_visual_critique,
+            model_visual_quality_gate: freshness.model_visual_quality_gate,
+            model_visual_quality_status: freshness.model_visual_quality_status,
+            model_visual_iteration: freshness.model_visual_iteration,
+            machine_blocking_issues: record.machine_blocking_issues,
+            fresh: freshness.fresh,
+            next_required_action: "assess",
+          }, { summary: `visual critique: ${record.model_visual_critique?.delivery_recommendation ?? "pending"}; quality_gate=${freshness.model_visual_quality_gate.status}` });
         }
         if (action === "assess") {
           if (!review_id) throw new Error("visual_review action=assess requires review_id");
@@ -98,21 +160,28 @@ export function registerVisualReviewTool(server: McpServer, workspaceRoot: strin
             review_id,
             target: record.target,
             kind: record.kind,
+            quality_bar: record.quality_bar ?? "standard",
             source_signature: record.source_signature,
             render_status: record.machine_blocking_issues.length === 0 ? "clean" : "blocked",
+            machine_ready: freshness.machine_ready,
+            verifiable: freshness.verifiable,
+            model_visual_ready: freshness.model_visual_ready,
             model_visual_status: record.model_visual_assessment?.verdict ?? "pending",
+            model_visual_semantic_status: record.model_visual_assessment?.verdict ?? "pending",
             model_visual_quality_status: freshness.model_visual_quality_status,
+            model_visual_quality_gate: freshness.model_visual_quality_gate,
             model_visual_iteration_ready: freshness.model_visual_iteration_ready,
+            model_visual_critique: record.model_visual_critique,
             model_visual_assessment: record.model_visual_assessment,
             model_visual_coverage: freshness.model_visual_coverage,
             model_visual_iteration: freshness.model_visual_iteration,
             recommended_next_pages: freshness.model_visual_coverage.missing_pages.slice(0, 12),
             machine_blocking_issues: record.machine_blocking_issues,
             fresh: freshness.fresh,
-          }, { summary: `visual assessment: ${record.model_visual_assessment?.verdict ?? "pending"}` });
+          }, { summary: `visual assessment: semantic=${record.model_visual_assessment?.verdict ?? "pending"} quality=${freshness.model_visual_quality_status}` });
         }
         if (!target?.trim()) throw new Error("visual_review action=review requires target");
-        const result = await performVisualReview(workspaceRoot, { target, ...options });
+        const result = await performVisualReview(workspaceRoot, { target, quality_bar, ...options });
         return visualReviewResult(result.data, result.images);
       } catch (error) {
         return toolError("visual_review", error instanceof Error ? error.message : String(error));

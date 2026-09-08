@@ -3,8 +3,9 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import { getVisualReviewFreshness } from "./visual-review-state.js";
-import { assertGoalAllowsTaskCompletion, getGoal } from "./goals.js";
+import { assertGoalAllowsTaskCompletion, getGoal, goalVisibleToSession } from "./goals.js";
 import { appendHarnessEventSafe, type HarnessEvidenceKind } from "./harness-events.js";
+import { getRuntimeScope } from "./runtime-scope.js";
 import { inferProjectRootsFromPaths, inferProjectScope, isPathWithinRoots } from "./project-scope.js";
 import { notifyStateInvalidated } from "./state-invalidate.js";
 
@@ -71,6 +72,7 @@ export interface DurableTask {
   recent_events: TaskEvent[];
   project_roots: string[];
   project_scope_locked: boolean;
+  owner_session?: string;
   checkpoint_no: number;
   visual_required: boolean;
   blocked?: TaskBlockedReason;
@@ -96,6 +98,7 @@ export interface TaskHandoff {
   blocking_remaining: number;
   advisory_remaining: number;
   observed_checks: TaskCheck[];
+  owner_session?: string;
   blocked?: TaskBlockedReason;
   last_failure?: TaskFailure;
   recent_events: TaskEvent[];
@@ -113,6 +116,20 @@ interface ActiveTaskPointer {
   updatedAt: number;
 }
 
+export interface DurableTaskSessionRebindPlan {
+  task_id: string;
+  from_session?: string;
+  to_session: string;
+}
+
+export interface DurableTaskSessionRebindResult {
+  migrated: boolean;
+  task_id?: string;
+  from_session?: string;
+  to_session?: string;
+  reason?: string;
+}
+
 const ACTIVE_TASK_TTL_MS = Math.min(
   30 * 24 * 60 * 60 * 1000,
   Math.max(60 * 60 * 1000, Number.parseInt(process.env.ACTIVE_TASK_TTL_MS || "86400000", 10) || 86_400_000)
@@ -125,6 +142,36 @@ const MAX_CHANGED_FILES = 40;
 
 function workspaceKey(workspaceRoot: string): string {
   return path.resolve(workspaceRoot).toLowerCase();
+}
+
+function currentSessionId(): string | undefined {
+  return getRuntimeScope()?.mcpSessionId;
+}
+
+class DurableTaskAccessError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DurableTaskAccessError";
+  }
+}
+
+function taskVisibleToSession(task: DurableTask, sessionId = currentSessionId()): boolean {
+  // Tasks written before session ownership was introduced remain workspace
+  // scoped. Once an owner exists, an absent session is just as foreign as a
+  // different session and must fail closed.
+  return !task.owner_session || task.owner_session === sessionId;
+}
+
+function assertDurableTaskAccessible(task: DurableTask, sessionId = currentSessionId()): void {
+  if (taskVisibleToSession(task, sessionId)) return;
+  if (!sessionId) {
+    throw new DurableTaskAccessError(
+      "This task belongs to a ChatGPT window, but no current MCP session is available; access is denied."
+    );
+  }
+  throw new DurableTaskAccessError(
+    "This task belongs to a different ChatGPT window; access is denied. Use goal(action=bind) for the explicit Goal/task migration contract."
+  );
 }
 
 async function withWorkspaceLock<T>(workspaceRoot: string, operation: () => Promise<T>): Promise<T> {
@@ -188,8 +235,11 @@ export async function recordGoalStallTelemetry(workspaceRoot: string): Promise<v
     if (gap <= 0) return;
     const goal = await getGoal(workspaceRoot);
     if (!goal || goal.status !== "active") return;
+    // Session scoping: another ChatGPT window's activity must not consume this
+    // goal's stall signal (and vice versa).
+    if (!goalVisibleToSession(goal, currentSessionId())) return;
 
-    const activeTaskId = await getActiveTaskId(workspaceRoot);
+    const activeTaskId = await getActiveTaskId(workspaceRoot, currentSessionId());
     let lastActivity = Date.parse(goal.updated_at);
     let taskId: string | undefined;
     let blocked = false;
@@ -210,8 +260,6 @@ export async function recordGoalStallTelemetry(workspaceRoot: string): Promise<v
     const throttleKey = workspaceKey(workspaceRoot);
     const lastNotified = lastStallNotified.get(throttleKey) ?? 0;
     if (Date.now() - lastNotified <= gap) return;
-    lastStallNotified.set(throttleKey, Date.now());
-    pruneStallThrottle();
 
     await appendHarnessEventSafe(workspaceRoot, {
       type: "goal/stall",
@@ -224,6 +272,10 @@ export async function recordGoalStallTelemetry(workspaceRoot: string): Promise<v
         scope: taskId ? "task" : "goal_only",
       },
     });
+    // Stamp the throttle only after the event is durably handed off, so a
+    // failed write retries on the next call instead of suppressing a stall.
+    lastStallNotified.set(throttleKey, Date.now());
+    pruneStallThrottle();
   } catch {}
 }
 
@@ -291,6 +343,7 @@ function normalizeTask(
         ? [path.resolve(workspaceRoot)]
         : [],
     project_scope_locked: raw.project_scope_locked ?? false,
+    ...(raw.owner_session ? { owner_session: raw.owner_session } : {}),
     ...(raw.blocked && typeof raw.blocked === "object"
       ? { blocked: raw.blocked as TaskBlockedReason }
       : {}),
@@ -323,6 +376,11 @@ function taskPath(workspaceRoot: string, taskId: string): string {
   return path.join(durableTaskDir(workspaceRoot), `${taskId}.json`);
 }
 
+async function readDurableTaskRecord(workspaceRoot: string, taskId: string): Promise<DurableTask> {
+  const raw = await fs.readFile(taskPath(workspaceRoot, taskId), "utf-8");
+  return normalizeTask(JSON.parse(raw) as DurableTask, workspaceRoot);
+}
+
 async function atomicWriteJson(filePath: string, value: unknown): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const temp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
@@ -349,16 +407,23 @@ async function recordTaskChange(workspaceRoot: string, operation: string, task: 
   });
 }
 
-async function setActiveTaskId(workspaceRoot: string, taskId: string | null): Promise<void> {
-  const key = workspaceKey(workspaceRoot);
+function activeTaskPathFor(workspaceRoot: string, sessionId?: string): string {
+  const dir = durableTaskDir(workspaceRoot);
+  return sessionId
+    ? path.join(dir, `active-task.${sessionId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 80)}.json`)
+    : path.join(dir, "active-task.json");
+}
+
+async function setActiveTaskId(workspaceRoot: string, sessionId: string | undefined, taskId: string | null): Promise<void> {
+  const key = `${workspaceKey(workspaceRoot)}::${sessionId ?? "legacy"}`;
   const previous = activeTaskCache.get(key)?.taskId ?? null;
   const updatedAt = Date.now();
   activeTaskCache.set(key, { taskId, updatedAt });
-  const filePath = activeTaskPath(workspaceRoot);
+  const filePath = activeTaskPathFor(workspaceRoot, sessionId);
   if (!taskId) {
     await fs.rm(filePath, { force: true });
   } else {
-    // Always rewrite: updated_at is the TTL heartbeat for the 24h pointer expiry.
+    // Always rewrite: updated_at is the TTL heartbeat for the pointer expiry.
     await atomicWriteJson(filePath, { task_id: taskId, updated_at: new Date(updatedAt).toISOString() });
   }
   // Observations re-assert the same pointer on every tool call; only a real
@@ -367,22 +432,23 @@ async function setActiveTaskId(workspaceRoot: string, taskId: string | null): Pr
   if (taskId !== previous) notifyStateInvalidated(workspaceRoot);
 }
 
-export async function getActiveTaskId(workspaceRoot: string): Promise<string | null> {
-  const key = workspaceKey(workspaceRoot);
+export async function getActiveTaskId(workspaceRoot: string, sessionId?: string): Promise<string | null> {
+  const key = `${workspaceKey(workspaceRoot)}::${sessionId ?? "legacy"}`;
+  const filePath = activeTaskPathFor(workspaceRoot, sessionId);
   const cached = activeTaskCache.get(key);
   if (cached) {
     if (!cached.taskId || Date.now() - cached.updatedAt <= ACTIVE_TASK_TTL_MS) return cached.taskId;
     activeTaskCache.delete(key);
-    await fs.rm(activeTaskPath(workspaceRoot), { force: true }).catch(() => {});
+    await fs.rm(filePath, { force: true }).catch(() => {});
     return null;
   }
   try {
-    const raw = JSON.parse(await fs.readFile(activeTaskPath(workspaceRoot), "utf-8")) as { task_id?: string; updated_at?: string };
+    const raw = JSON.parse(await fs.readFile(filePath, "utf-8")) as { task_id?: string; updated_at?: string };
     const taskId = typeof raw.task_id === "string" ? raw.task_id : null;
     const updatedAt = Date.parse(raw.updated_at || "");
     if (taskId && (!Number.isFinite(updatedAt) || Date.now() - updatedAt > ACTIVE_TASK_TTL_MS)) {
       activeTaskCache.set(key, { taskId: null, updatedAt: Date.now() });
-      await fs.rm(activeTaskPath(workspaceRoot), { force: true });
+      await fs.rm(filePath, { force: true });
       return null;
     }
     activeTaskCache.set(key, { taskId, updatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now() });
@@ -391,6 +457,135 @@ export async function getActiveTaskId(workspaceRoot: string): Promise<string | n
     activeTaskCache.set(key, { taskId: null, updatedAt: Date.now() });
     return null;
   }
+}
+
+/**
+ * Preflight the durable-task half of an explicit Goal session bind.
+ *
+ * The Goal and task stores are separate, so the Goal tool uses this before it
+ * mutates Goal ownership. A conflicting active task in the destination window
+ * is rejected up front instead of silently replacing that window's work.
+ */
+export async function planActiveDurableTaskSessionRebind(
+  workspaceRoot: string,
+  fromSession: string | undefined,
+  toSession: string
+): Promise<DurableTaskSessionRebindPlan | null> {
+  if (!toSession || fromSession === toSession) return null;
+
+  const sourceTaskId = await getActiveTaskId(workspaceRoot, fromSession);
+  if (!sourceTaskId) return null;
+
+  // This read is part of the explicit Goal bind migration contract. The
+  // source session is intentionally inspected while the destination session
+  // owns the bind invocation; ownership is checked below before migration.
+  const sourceTask = await readDurableTaskRecord(workspaceRoot, sourceTaskId);
+  if (sourceTask.status !== "active" && sourceTask.status !== "blocked") return null;
+
+  if (sourceTask.owner_session && sourceTask.owner_session !== fromSession && sourceTask.owner_session !== toSession) {
+    throw new Error(
+      `GOAL_BIND_TASK_OWNER_CONFLICT: active task ${sourceTask.id} belongs to session ${sourceTask.owner_session.slice(0, 8)}…`
+    );
+  }
+
+  const destinationTaskId = await getActiveTaskId(workspaceRoot, toSession);
+  if (destinationTaskId && destinationTaskId !== sourceTaskId) {
+    throw new Error(
+      `GOAL_BIND_TASK_CONFLICT: destination ChatGPT window already has active task ${destinationTaskId}; ` +
+      `complete/cancel it before binding this Goal.`
+    );
+  }
+
+  return {
+    task_id: sourceTaskId,
+    ...(fromSession ? { from_session: fromSession } : {}),
+    to_session: toSession,
+  };
+}
+
+async function commitActiveDurableTaskSessionRebindUnlocked(
+  workspaceRoot: string,
+  plan: DurableTaskSessionRebindPlan | null
+): Promise<DurableTaskSessionRebindResult> {
+  if (!plan) return { migrated: false, reason: "no-active-task-to-migrate" };
+
+  const sourcePointer = await getActiveTaskId(workspaceRoot, plan.from_session);
+  const destinationPointer = await getActiveTaskId(workspaceRoot, plan.to_session);
+  if (destinationPointer && destinationPointer !== plan.task_id) {
+    throw new Error(
+      `GOAL_BIND_TASK_CONFLICT: destination ChatGPT window already has active task ${destinationPointer}.`
+    );
+  }
+  if (sourcePointer !== plan.task_id && destinationPointer !== plan.task_id) {
+    throw new Error(
+      `GOAL_BIND_TASK_STALE_PLAN: active task pointer changed before migration of ${plan.task_id}; retry Goal bind status/recovery.`
+    );
+  }
+
+  // See the preflight note above: migration is the one supported cross-session
+  // read, and the owner/conflict checks below must run before the write.
+  const task = await readDurableTaskRecord(workspaceRoot, plan.task_id);
+  if (task.status !== "active" && task.status !== "blocked") {
+    return {
+      migrated: false,
+      task_id: task.id,
+      ...(plan.from_session ? { from_session: plan.from_session } : {}),
+      to_session: plan.to_session,
+      reason: `task-is-${task.status}`,
+    };
+  }
+  if (task.owner_session && task.owner_session !== plan.from_session && task.owner_session !== plan.to_session) {
+    throw new Error(
+      `GOAL_BIND_TASK_OWNER_CONFLICT: task ${task.id} changed owner before migration.`
+    );
+  }
+
+  const next: DurableTask = {
+    ...task,
+    owner_session: plan.to_session,
+    updated_at: new Date().toISOString(),
+  };
+  await atomicWriteJson(taskPath(workspaceRoot, task.id), next);
+  await setActiveTaskId(workspaceRoot, plan.to_session, task.id);
+  if (plan.from_session !== plan.to_session && (await getActiveTaskId(workspaceRoot, plan.from_session)) === task.id) {
+    await setActiveTaskId(workspaceRoot, plan.from_session, null);
+  }
+  notifyStateInvalidated(workspaceRoot);
+  await recordTaskChange(workspaceRoot, "bind-session", next);
+
+  return {
+    migrated: true,
+    task_id: task.id,
+    ...(plan.from_session ? { from_session: plan.from_session } : {}),
+    to_session: plan.to_session,
+  };
+}
+
+/** Commit a preflighted task-session migration as a standalone task mutation. */
+export async function commitActiveDurableTaskSessionRebind(
+  workspaceRoot: string,
+  plan: DurableTaskSessionRebindPlan | null
+): Promise<DurableTaskSessionRebindResult> {
+  return withWorkspaceLock(workspaceRoot, () => commitActiveDurableTaskSessionRebindUnlocked(workspaceRoot, plan));
+}
+
+/**
+ * Hold the durable-task workspace lock across preflight, Goal ownership change,
+ * and task migration. This closes the race where the destination session could
+ * create/activate another task after preflight but before migration commit.
+ */
+export async function runWithActiveDurableTaskSessionRebind<T>(
+  workspaceRoot: string,
+  fromSession: string | undefined,
+  toSession: string,
+  operation: () => Promise<T>
+): Promise<{ value: T; durable_task_rebind: DurableTaskSessionRebindResult }> {
+  return withWorkspaceLock(workspaceRoot, async () => {
+    const plan = await planActiveDurableTaskSessionRebind(workspaceRoot, fromSession, toSession);
+    const value = await operation();
+    const durable_task_rebind = await commitActiveDurableTaskSessionRebindUnlocked(workspaceRoot, plan);
+    return { value, durable_task_rebind };
+  });
 }
 
 export async function createDurableTask(
@@ -406,6 +601,7 @@ export async function createDurableTask(
   }
 ): Promise<DurableTask> {
   const now = new Date().toISOString();
+  const ownerSession = currentSessionId();
   const scope = await inferProjectScope(workspaceRoot, [input.goal, input.current_step, ...(input.notes ?? [])]);
   const task: DurableTask = {
     version: 2,
@@ -426,6 +622,7 @@ export async function createDurableTask(
     recent_events: [],
     project_roots: scope.roots,
     project_scope_locked: scope.locked,
+    ...(ownerSession ? { owner_session: ownerSession } : {}),
     checkpoint_no: 0,
     visual_required: Boolean(input.visual_required),
     created_at: now,
@@ -433,7 +630,7 @@ export async function createDurableTask(
   };
   await withWorkspaceLock(workspaceRoot, async () => {
     await atomicWriteJson(taskPath(workspaceRoot, task.id), task);
-    await setActiveTaskId(workspaceRoot, task.id);
+    await setActiveTaskId(workspaceRoot, currentSessionId(), task.id);
     notifyStateInvalidated(workspaceRoot);
   });
   await recordTaskChange(workspaceRoot, "create", task);
@@ -441,8 +638,9 @@ export async function createDurableTask(
 }
 
 export async function getDurableTask(workspaceRoot: string, taskId: string): Promise<DurableTask> {
-  const raw = await fs.readFile(taskPath(workspaceRoot, taskId), "utf-8");
-  return normalizeTask(JSON.parse(raw) as DurableTask, workspaceRoot);
+  const task = await readDurableTaskRecord(workspaceRoot, taskId);
+  assertDurableTaskAccessible(task);
+  return task;
 }
 
 export async function updateDurableTask(
@@ -464,27 +662,42 @@ export async function updateDurableTask(
     if (next.status === "completed" || next.status === "cancelled") delete next.blocked;
     await atomicWriteJson(taskPath(workspaceRoot, taskId), next);
     notifyStateInvalidated(workspaceRoot);
-    if (next.status === "active" || next.status === "blocked") await setActiveTaskId(workspaceRoot, taskId);
-    else if ((await getActiveTaskId(workspaceRoot)) === taskId) await setActiveTaskId(workspaceRoot, null);
+    if (next.status === "active" || next.status === "blocked") await setActiveTaskId(workspaceRoot, currentSessionId(), taskId);
+    else if ((await getActiveTaskId(workspaceRoot, currentSessionId())) === taskId) await setActiveTaskId(workspaceRoot, currentSessionId(), null);
     await recordTaskChange(workspaceRoot, "update", next);
     return next;
   });
 }
 
-export async function resolveDurableTask(workspaceRoot: string, taskId?: string): Promise<DurableTask> {
-  if (taskId) return getDurableTask(workspaceRoot, taskId);
-  const activeId = await getActiveTaskId(workspaceRoot);
+export async function resolveDurableTask(
+  workspaceRoot: string,
+  taskId?: string,
+  sessionId?: string
+): Promise<DurableTask> {
+  const session = sessionId ?? currentSessionId();
+  if (taskId) {
+    // Controlled resolution is allowed to supply an explicit session when no
+    // RuntimeScope exists. Read raw state only here, then authorize against
+    // that resolved session before returning anything.
+    const task = await readDurableTaskRecord(workspaceRoot, taskId);
+    assertDurableTaskAccessible(task, session);
+    return task;
+  }
+  const activeId = await getActiveTaskId(workspaceRoot, session);
   if (activeId) {
     try {
-      return await getDurableTask(workspaceRoot, activeId);
-    } catch {
-      await setActiveTaskId(workspaceRoot, null);
-    }
+      const task = await readDurableTaskRecord(workspaceRoot, activeId);
+      if (taskVisibleToSession(task, session)) return task;
+    } catch {}
   }
-  const recent = await listDurableTasks(workspaceRoot, { limit: 20 });
-  const resumable = recent.find((task) => task.status === "active" || task.status === "blocked");
+  const recent = await listDurableTasks(workspaceRoot, { limit: 20, sessionId: session });
+  const resumable = recent.find(
+    (task) =>
+      (task.status === "active" || task.status === "blocked") &&
+      taskVisibleToSession(task, session)
+  );
   if (!resumable) throw new Error("No active task. Create one with task_state action=create.");
-  await setActiveTaskId(workspaceRoot, resumable.id);
+  await setActiveTaskId(workspaceRoot, session, resumable.id);
   return resumable;
 }
 
@@ -545,7 +758,7 @@ export async function checkpointDurableTask(
       ].slice(-MAX_EVENTS),
     };
     await atomicWriteJson(taskPath(workspaceRoot, next.id), next);
-    await setActiveTaskId(workspaceRoot, next.id);
+    await setActiveTaskId(workspaceRoot, currentSessionId(), next.id);
     notifyStateInvalidated(workspaceRoot);
     await recordTaskChange(workspaceRoot, "checkpoint", next);
     return next;
@@ -572,6 +785,7 @@ export function taskHandoff(task: DurableTask): TaskHandoff {
     recent_events: task.recent_events.slice(-8),
     project_roots: task.project_roots,
     project_scope_locked: task.project_scope_locked,
+    ...(task.owner_session ? { owner_session: task.owner_session } : {}),
     checkpoint_no: task.checkpoint_no,
     visual_required: task.visual_required,
     ...(task.last_mutation_at ? { last_mutation_at: task.last_mutation_at } : {}),
@@ -718,17 +932,21 @@ export async function recordToolObservation(
   thrownError?: unknown
 ): Promise<void> {
   if (tool === "task_state" || tool.startsWith("task_")) return;
-  const taskId = await getActiveTaskId(workspaceRoot);
+  const session = currentSessionId();
+  const taskId = await getActiveTaskId(workspaceRoot, session);
   if (!taskId) return;
 
   await withWorkspaceLock(workspaceRoot, async () => {
     let task: DurableTask;
     try {
       task = await getDurableTask(workspaceRoot, taskId);
-    } catch {
-      await setActiveTaskId(workspaceRoot, null);
+    } catch (error) {
+      if (error instanceof DurableTaskAccessError) return;
+      await setActiveTaskId(workspaceRoot, session, null);
       return;
     }
+    // Session scoping: never write observations into another window's task.
+    if (!taskVisibleToSession(task, session)) return;
     if (task.status !== "active" && task.status !== "blocked") return;
 
     const payload = resultPayload(result);
@@ -833,7 +1051,7 @@ export async function recordToolObservation(
           }),
     };
     await atomicWriteJson(taskPath(workspaceRoot, taskId), next);
-    await setActiveTaskId(workspaceRoot, taskId);
+    await setActiveTaskId(workspaceRoot, currentSessionId(), taskId);
     // Observation mutations (recent_events/observed_checks/changed_files) do
     // not alter any field the broker snapshot renders, so no invalidation here.
     const evidenceKind = observationEvidenceKind(tool, data);
@@ -922,8 +1140,11 @@ export async function completeDurableTask(workspaceRoot: string, taskId: string,
 
 export async function listDurableTasks(
   workspaceRoot: string,
-  options?: { status?: DurableTaskStatus; limit?: number }
+  options?: { status?: DurableTaskStatus; limit?: number; sessionId?: string }
 ): Promise<DurableTask[]> {
+  // sessionId is an internal resolution selector; ordinary Task tools never
+  // expose it and therefore retain ambient RuntimeScope authorization.
+  const session = options?.sessionId ?? currentSessionId();
   const dir = durableTaskDir(workspaceRoot);
   let names: string[];
   try {
@@ -936,6 +1157,7 @@ export async function listDurableTasks(
   for (const name of names) {
     try {
       const task = normalizeTask(JSON.parse(await fs.readFile(path.join(dir, name), "utf-8")) as DurableTask, workspaceRoot);
+      if (!taskVisibleToSession(task, session)) continue;
       if (!options?.status || task.status === options.status) tasks.push(task);
     } catch {}
   }

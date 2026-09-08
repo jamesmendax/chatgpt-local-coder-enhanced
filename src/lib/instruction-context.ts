@@ -14,7 +14,6 @@ import { appendAutoMemory, formatAutoMemoryForInstructions, loadAutoMemory } fro
 import { formatSkillsForInstructions, loadProjectSkills } from "./skills-loader.js";
 import { getChatGptToolProfile } from "./tool-profile.js";
 import { buildServerInstructions } from "./quickstart.js";
-import { formatActiveGoalForInstructions } from "./goals.js";
 
 export interface InstructionContextOptions {
   workspaceRoot: string;
@@ -35,7 +34,7 @@ export async function buildInstructionContext(
 ): Promise<InstructionContext> {
   const profile = getChatGptToolProfile();
   const isWebSlim = profile === "slim";
-  const [projectMemory, git, skills, autoMemory, activeGoal] = await Promise.all([
+  const [projectMemory, git, skills, autoMemory] = await Promise.all([
     loadProjectMemory(opts.workspaceRoot, {
       workspaceRoots: opts.workspaceRoots,
       maxBytes: isWebSlim ? 8_000 : undefined,
@@ -44,13 +43,11 @@ export async function buildInstructionContext(
     collectGitSnapshot(opts.workspaceRoot),
     isWebSlim ? Promise.resolve([]) : loadProjectSkills(opts.workspaceRoot),
     loadAutoMemory(opts.workspaceRoot, isWebSlim ? { maxBytes: 4_000, maxLines: 40 } : undefined),
-    formatActiveGoalForInstructions(opts.workspaceRoot),
   ]);
 
   const blocks = [
     CODEX_AGENT_PROMPT,
     `Tool profile: **${profile}**.`,
-    activeGoal,
     formatEnvironmentForInstructions({
       workspaceRoot: opts.workspaceRoot,
       workspaceRoots: opts.workspaceRoots,

@@ -20,6 +20,7 @@ export interface ShellExecResult {
 }
 
 import { loadGlobalShellState, saveGlobalShellState } from "./global-shell-state.js";
+import { childProcessEnv } from "./child-env.js";
 
 let sessionCwd: string | null = null;
 let sessionInitializedAt: string | null = null;
@@ -68,7 +69,7 @@ function appendCappedText(current: string, chunk: string, maxChars: number): str
   return overflow > 0 ? current.slice(overflow) + chunk : current + chunk;
 }
 
-function terminateProcessTree(child: ChildProcess): void {
+export function terminateProcessTree(child: ChildProcess): void {
   if (!child.pid) return;
   if (process.platform === "win32") {
     try {
@@ -275,7 +276,7 @@ function runOnce(command: string, cwd: string, timeoutMs: number): Promise<Shell
       cwd,
       windowsHide: true,
       env: {
-        ...process.env,
+        ...childProcessEnv(),
         CI: "true",
         PAGER: "cat",
         GIT_PAGER: "cat",
@@ -305,6 +306,9 @@ function runOnce(command: string, cwd: string, timeoutMs: number): Promise<Shell
         resolve(result);
         return;
       }
+      // A failing log stream (disk full, deleted dir) must not leave the
+      // caller pending forever — the result still resolves best-effort.
+      log.stream.once("error", () => resolve(result));
       log.stream.end(trailer, () => resolve(result));
     };
 
@@ -366,7 +370,22 @@ function runOnce(command: string, cwd: string, timeoutMs: number): Promise<Shell
   });
 }
 
+let shellExecChain: Promise<unknown> = Promise.resolve();
+
 export async function execInShellSession(
+  command: string,
+  defaultCwd: string,
+  timeoutMs: number,
+  workingDirectory?: string
+): Promise<ShellExecResult> {
+  // sessionCwd and the persisted global state are shared across concurrent
+  // calls — serialize them so parallel run_command invocations cannot race.
+  const run = shellExecChain.catch(() => undefined).then(() => execInShellSessionInner(command, defaultCwd, timeoutMs, workingDirectory));
+  shellExecChain = run.catch(() => undefined);
+  return run;
+}
+
+async function execInShellSessionInner(
   command: string,
   defaultCwd: string,
   timeoutMs: number,
@@ -376,17 +395,23 @@ export async function execInShellSession(
   const persistentCwd = sessionCwd!;
   const executionBase = workingDirectory ? path.resolve(workingDirectory) : persistentCwd;
   const { cwd, command: effective } = applyCwdDirectives(executionBase, command);
-  if (!workingDirectory) sessionCwd = cwd;
 
   history.push(effective);
   if (history.length > MAX_HISTORY) history.shift();
 
   const result = await runOnce(effective, cwd, timeoutMs);
-  if (!workingDirectory) sessionCwd = cwd;
+  // Commit the session cwd only after a successful run: a failed `cd` (or a
+  // failing command after cd) must not poison every later call in the session.
+  if (!workingDirectory && result.exit_code === 0) sessionCwd = cwd;
 
   if (persistenceRoot) {
     const prev = await loadGlobalShellState(persistenceRoot, defaultCwd);
-    await saveGlobalShellState(persistenceRoot, workingDirectory ? persistentCwd : cwd, effective, prev);
+    await saveGlobalShellState(
+      persistenceRoot,
+      workingDirectory ? persistentCwd : result.exit_code === 0 ? cwd : persistentCwd,
+      effective,
+      prev
+    );
   }
 
   return result;

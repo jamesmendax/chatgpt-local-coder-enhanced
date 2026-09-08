@@ -5,7 +5,6 @@ dist/
 .tool-test-tmp/
 bin/
 profiles/*
-!profiles/mcp-upstream.json
 !profiles/post-edit-hooks.json
 !profiles/chatgpt-connector-description.txt
 .mcp-state/
@@ -13,9 +12,11 @@ profiles/*
 .codex-remote-attachments/
 .env
 .secrets/
+.codex/task-harness/
 terminals/
 agent-tools/
 mcps/
+cairn/
 log_console.txt
 *.log
 .DS_Store
@@ -25,3 +26,7 @@ Thumbs.db
 openai-tunnel-business.ps1
 # local-only binary tutorial
 chatgpt-local-coder-部署教程.docx
+
+# Local-only engineering evidence and configuration
+.codex/
+.cairn/

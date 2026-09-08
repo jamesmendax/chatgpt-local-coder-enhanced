@@ -14,7 +14,7 @@ export const LOCAL_TOOL_CATALOG = [
   "browser_open", "browser_action", "browser_close",
   "git_status", "git_diff", "git_log", "git_add", "git_commit", "git_branch", "git_checkout", "git_restore", "git_stash",
   "git_reset", "git_pull", "git_push",
-  "agent_status", "project_context", "remember", "load_path_rules", "list_skills", "load_skill", "rewind",
+  "agent_status", "project_context", "remember", "load_path_rules", "list_skills", "load_skill", "install_skill", "uninstall_skill", "set_skill_enabled", "rewind",
   "mcp_servers", "mcp_tools", "mcp_call",
 ];
 
@@ -63,6 +63,9 @@ export const SLIM_CHATGPT_TOOLS = new Set([
   "remember",
   "list_skills",
   "load_skill",
+  "install_skill",
+  "uninstall_skill",
+  "set_skill_enabled",
   "goal",
   "task_state",
   "visual_review",

@@ -14,6 +14,7 @@ import {
   MAX_VISUAL_ITERATIONS,
   saveVisualReviewRecord,
   type VisualArtifactKind,
+  type VisualQualityBar,
 } from "./visual-review-state.js";
 
 const execFileAsync = promisify(execFile);
@@ -22,6 +23,12 @@ const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 const MAX_TOTAL_RETURN_IMAGE_BYTES = 16 * 1024 * 1024;
 const MAX_PAGES = 12;
 const MAX_FOCUS = 8;
+// Chromium can take longer to tear down after several sequential visual
+// reviews, especially while the user's Chrome instance is under load. Keep
+// cleanup bounded, but do not turn a successful capture into a false failure
+// merely because a graceful close needs a few extra seconds.
+const MAX_VISUAL_CLEANUP_MS = 15_000;
+const MAX_PDF_SCREENSHOT_ATTEMPTS = 5;
 
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
   ".png": "image/png",
@@ -46,6 +53,7 @@ export interface VisualFocusInput {
 export interface VisualReviewInput {
   target: string;
   kind?: "auto" | VisualArtifactKind;
+  quality_bar?: VisualQualityBar;
   output_dir?: string;
   width?: number;
   height?: number;
@@ -57,6 +65,12 @@ export interface VisualReviewInput {
   max_images?: number;
   allow_office_running?: boolean;
 }
+
+const VISUAL_QUALITY_BAR_RANK: Record<VisualQualityBar, number> = {
+  draft: 0,
+  standard: 1,
+  polished: 2,
+};
 
 export interface VisualImagePayload {
   path: string;
@@ -158,19 +172,43 @@ export function findVisualBrowserExecutable(): string | null {
   return null;
 }
 
-async function withVisualDeadline<T>(
+interface VisualDeadline {
+  timeoutMs: number;
+  remainingMs: () => number;
+}
+
+function createVisualDeadline(timeoutMs: number): VisualDeadline {
+  const bounded = Math.max(1, Math.floor(timeoutMs));
+  const expiresAt = Date.now() + bounded;
+  return {
+    timeoutMs: bounded,
+    remainingMs: () => Math.max(0, expiresAt - Date.now()),
+  };
+}
+
+function visualDeadlineError(label: string, deadline: VisualDeadline): Error {
+  return new Error(`${label} timed out after ${deadline.timeoutMs}ms`);
+}
+
+function visualOperationTimeout(deadline: VisualDeadline, label: string, requestedMs = deadline.timeoutMs): number {
+  const remaining = Math.floor(deadline.remainingMs());
+  if (remaining <= 0) throw visualDeadlineError(label, deadline);
+  return Math.max(1, Math.min(Math.floor(requestedMs), remaining));
+}
+
+async function withBoundedTimeout<T>(
   label: string,
   timeoutMs: number,
   operation: () => Promise<T>,
-  onTimeout?: () => void
+  onTimeout?: () => void | Promise<void>
 ): Promise<T> {
-  const bounded = Math.max(1_000, Math.floor(timeoutMs));
+  const bounded = Math.max(1, Math.floor(timeoutMs));
   return new Promise<T>((resolve, reject) => {
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      try { onTimeout?.(); } catch {}
+      try { void Promise.resolve(onTimeout?.()).catch(() => undefined); } catch {}
       reject(new Error(`${label} timed out after ${bounded}ms`));
     }, bounded);
     timer.unref?.();
@@ -193,32 +231,148 @@ async function withVisualDeadline<T>(
   });
 }
 
-function browserLifecycleTimeout(timeoutMs: number, multiplier = 2): number {
-  return Math.min(180_000, Math.max(5_000, timeoutMs * multiplier + 5_000));
+async function withVisualDeadline<T>(
+  label: string,
+  deadline: VisualDeadline,
+  operation: () => Promise<T>,
+  onTimeout?: () => void | Promise<void>
+): Promise<T> {
+  const remaining = visualOperationTimeout(deadline, label);
+  return withBoundedTimeout(label, remaining, operation, onTimeout).catch((error) => {
+    if (error instanceof Error && error.message === `${label} timed out after ${remaining}ms`) {
+      throw visualDeadlineError(label, deadline);
+    }
+    throw error;
+  });
 }
 
-async function closeVisualBrowser(browser: Browser, timeoutMs: number): Promise<void> {
-  const closeTimeout = Math.min(5_000, Math.max(1_000, Math.floor(timeoutMs / 4)));
-  await withVisualDeadline("Visual browser close", closeTimeout, () => browser.close()).catch(() => undefined);
+function normalizeVisualError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
-async function launchVisualBrowser(timeoutMs = 30_000): Promise<Browser> {
+async function withVisualCleanup<T>(
+  operation: () => Promise<T>,
+  cleanup: () => Promise<Error | undefined>
+): Promise<T> {
+  let result!: T;
+  let primaryError: Error | undefined;
+  try {
+    result = await operation();
+  } catch (error) {
+    primaryError = normalizeVisualError(error);
+  }
+
+  let cleanupError: Error | undefined;
+  try {
+    cleanupError = await cleanup();
+  } catch (error) {
+    cleanupError = normalizeVisualError(error);
+  }
+
+  if (primaryError) throw primaryError;
+  if (cleanupError) throw cleanupError;
+  return result;
+}
+
+async function closeVisualResource(
+  label: string,
+  deadline: VisualDeadline,
+  close: () => Promise<unknown>
+): Promise<Error | undefined> {
+  const closePromise = Promise.resolve().then(close);
+  const remaining = Math.floor(deadline.remainingMs());
+  if (remaining <= 0) {
+    void closePromise.catch(() => undefined);
+    return visualDeadlineError(label, deadline);
+  }
+  try {
+    await withBoundedTimeout(label, Math.min(MAX_VISUAL_CLEANUP_MS, remaining), () => closePromise);
+    return undefined;
+  } catch (error) {
+    return normalizeVisualError(error);
+  }
+}
+
+async function closeVisualPage(page: Page, deadline: VisualDeadline, label: string): Promise<Error | undefined> {
+  if (page.isClosed()) return undefined;
+  return closeVisualResource(label, deadline, () => page.close());
+}
+
+async function closeVisualBrowser(browser: Browser, deadline: VisualDeadline): Promise<Error | undefined> {
+  return closeVisualResource("Visual browser close", deadline, () => browser.close());
+}
+
+async function launchVisualBrowser(deadline: VisualDeadline): Promise<Browser> {
   const executablePath = findVisualBrowserExecutable();
   if (!executablePath) {
     throw new Error("No supported Chromium browser found. Set CHATGPT_BROWSER_PATH to Edge/Chrome/Chromium executable.");
   }
-  return chromium.launch({
-    executablePath,
-    headless: true,
-    timeout: Math.max(1_000, Math.min(120_000, timeoutMs)),
-    args: [
-      "--disable-gpu",
-      "--hide-scrollbars",
-      "--no-first-run",
-      "--disable-extensions",
-      "--allow-file-access-from-files",
-    ],
-  });
+  let launchPromise: Promise<Browser> | undefined;
+  return withVisualDeadline(
+    "Visual browser launch",
+    deadline,
+    () => {
+      launchPromise = chromium.launch({
+        executablePath,
+        headless: true,
+        timeout: Math.min(120_000, visualOperationTimeout(deadline, "Visual browser launch")),
+        args: [
+          "--disable-gpu",
+          "--hide-scrollbars",
+          "--no-first-run",
+          "--disable-extensions",
+          "--allow-file-access-from-files",
+        ],
+      });
+      return launchPromise;
+    },
+    () => {
+      void launchPromise?.then((browser) => closeVisualBrowser(browser, deadline)).catch(() => undefined);
+    }
+  );
+}
+
+async function withVisualPage<T>(
+  browser: Browser,
+  deadline: VisualDeadline,
+  label: string,
+  viewport: { width: number; height: number; deviceScaleFactor?: number },
+  operation: (page: Page) => Promise<T>
+): Promise<T> {
+  let pagePromise: Promise<Page> | undefined;
+  const page = await withVisualDeadline(
+    `${label} open`,
+    deadline,
+    () => {
+      pagePromise = browser.newPage(viewport);
+      return pagePromise;
+    },
+    () => {
+      void pagePromise
+        ?.then((latePage) => closeVisualPage(latePage, deadline, `${label} close`))
+        .catch(() => undefined);
+    }
+  );
+  let closePromise: Promise<Error | undefined> | undefined;
+  const close = (): Promise<Error | undefined> => closePromise || (closePromise = closeVisualPage(page, deadline, `${label} close`));
+  return withVisualCleanup(
+    () => withVisualDeadline(label, deadline, () => operation(page), () => { void close(); }),
+    close
+  );
+}
+
+async function withVisualBrowser<T>(
+  label: string,
+  deadline: VisualDeadline,
+  operation: (browser: Browser) => Promise<T>
+): Promise<T> {
+  const browser = await launchVisualBrowser(deadline);
+  let closePromise: Promise<Error | undefined> | undefined;
+  const close = (): Promise<Error | undefined> => closePromise || (closePromise = closeVisualBrowser(browser, deadline));
+  return withVisualCleanup(
+    () => withVisualDeadline(label, deadline, () => operation(browser), () => { void close(); }),
+    close
+  );
 }
 
 async function resolveTarget(rawTarget: string): Promise<ResolvedTarget> {
@@ -313,9 +467,10 @@ async function pageMetrics(page: Page): Promise<Record<string, unknown>> {
   });
 }
 
-async function waitForVisualStability(page: Page, timeoutMs: number): Promise<void> {
-  const fontWaitMs = Math.min(3_000, Math.max(250, Math.floor(timeoutMs / 4)));
-  await withVisualDeadline("Visual font stabilization", fontWaitMs + 1_000, () => page.evaluate(async (waitMs) => {
+async function waitForVisualStability(page: Page, deadline: VisualDeadline): Promise<void> {
+  const availableMs = visualOperationTimeout(deadline, "Visual font stabilization");
+  const fontWaitMs = Math.min(3_000, Math.max(250, Math.floor(availableMs / 4)));
+  await withVisualDeadline("Visual font stabilization", deadline, () => page.evaluate(async (waitMs) => {
     const fonts = (document as Document & { fonts?: FontFaceSet }).fonts;
     if (fonts?.ready) {
       await Promise.race([
@@ -324,14 +479,19 @@ async function waitForVisualStability(page: Page, timeoutMs: number): Promise<vo
       ]);
     }
   }, fontWaitMs)).catch(() => undefined);
-  await page.waitForTimeout(Math.min(350, Math.max(80, Math.floor(timeoutMs / 100))));
+  const settleMs = Math.min(350, Math.max(80, Math.floor(availableMs / 100)));
+  await withVisualDeadline(
+    "Visual stability settle",
+    deadline,
+    () => page.waitForTimeout(Math.min(settleMs, visualOperationTimeout(deadline, "Visual stability settle", settleMs)))
+  );
 }
 
 async function captureSelectorFocus(
   page: Page,
   focusItems: VisualFocusInput[],
   outputDir: string,
-  timeoutMs: number
+  deadline: VisualDeadline
 ): Promise<{
   paths: string[];
   details: Array<Record<string, unknown>>;
@@ -340,11 +500,12 @@ async function captureSelectorFocus(
   const paths: string[] = [];
   const details: Array<Record<string, unknown>> = [];
   const issues: string[] = [];
-  const metrics = await pageMetrics(page);
+  const metrics = await withVisualDeadline("Visual focus metrics", deadline, () => pageMetrics(page));
   const documentWidth = Number(metrics.document_width) || 1;
   const documentHeight = Number(metrics.document_height) || 1;
 
   for (let index = 0; index < Math.min(focusItems.length, MAX_FOCUS); index++) {
+    page.setDefaultTimeout(visualOperationTimeout(deadline, "Visual focus capture"));
     const focus = focusItems[index];
     const selector = selectorForFocus(focus);
     if (!selector) continue;
@@ -381,7 +542,13 @@ async function captureSelectorFocus(
       height: Math.max(1, Math.min(documentHeight - Math.max(0, combined.y - padding), combined.height + padding * 2)),
     };
     const outputPath = path.join(outputDir, `focus-${String(index + 1).padStart(2, "0")}.png`);
-    await page.screenshot({ path: outputPath, type: "png", clip, animations: "disabled", timeout: timeoutMs });
+    await page.screenshot({
+      path: outputPath,
+      type: "png",
+      clip,
+      animations: "disabled",
+      timeout: visualOperationTimeout(deadline, "Visual focus screenshot"),
+    });
     paths.push(outputPath);
 
     const svgBox = await locator.evaluate((element) => {
@@ -417,74 +584,69 @@ async function captureBrowserArtifact(
   outputDir: string,
   width: number,
   height: number,
-  timeoutMs: number,
+  deadline: VisualDeadline,
   fullPage: boolean,
   focusItems: VisualFocusInput[]
 ): Promise<BrowserCaptureResult> {
-  const browser = await launchVisualBrowser(timeoutMs);
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
   const requestFailures: string[] = [];
-  try {
-    return await withVisualDeadline(
-      "Visual browser capture",
-      browserLifecycleTimeout(timeoutMs),
-      async () => {
-        const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
-        page.setDefaultTimeout(timeoutMs);
-        page.on("console", (message) => {
-          if (message.type() === "error") consoleErrors.push(message.text().slice(0, 1000));
-        });
-        page.on("pageerror", (error) => pageErrors.push(error.message.slice(0, 1000)));
-        page.on("requestfailed", (request) => requestFailures.push(`${request.method()} ${request.url()} ${request.failure()?.errorText || "failed"}`.slice(0, 1000)));
-        await page.goto(resolved.target, { waitUntil: "domcontentloaded", timeout: timeoutMs });
-        await waitForVisualStability(page, timeoutMs);
-        const metrics = await withVisualDeadline("Visual page metrics", timeoutMs, () => pageMetrics(page));
-        const documentHeight = Number(metrics.document_height) || height;
-        const documentWidth = Number(metrics.document_width) || width;
-        const useFullPage = fullPage && documentHeight <= MAX_RENDER_DIMENSION * 4 && documentWidth <= MAX_RENDER_DIMENSION;
-        const overviewPath = path.join(outputDir, "overview.png");
-        await page.screenshot({
-          path: overviewPath,
-          type: "png",
-          fullPage: useFullPage,
-          animations: "disabled",
-          timeout: timeoutMs,
-        });
-        const selectorFocus = await captureSelectorFocus(page, focusItems, outputDir, timeoutMs);
-        const machineIssues = [
-          ...pageErrors.map((error) => `Page error: ${error}`),
-          ...consoleErrors.map((error) => `Console error: ${error}`),
-          ...selectorFocus.issues,
-        ];
-        const clippedCount = Number(metrics.clipped_element_count) || 0;
-        const advisories = [
-          ...requestFailures.slice(0, 10).map((failure) => `Request failed: ${failure}`),
-          ...(clippedCount > 0 ? [`Detected ${clippedCount} element(s) with clipped/overflowing content.`] : []),
-          ...(fullPage && !useFullPage ? ["Full-page capture was bounded because the document exceeded the safe render size."] : []),
-        ];
-        return {
-          overviewPath,
-          focusPaths: selectorFocus.paths,
-          focusDetails: selectorFocus.details,
-          machineIssues,
-          advisories,
-          diagnostics: {
-            ...metrics,
-            console_errors: consoleErrors,
-            page_errors: pageErrors,
-            request_failures: requestFailures,
-            full_page_requested: fullPage,
-            full_page_captured: useFullPage,
-            browser: findVisualBrowserExecutable(),
-          },
-        };
-      },
-      () => { void browser.close().catch(() => undefined); }
-    );
-  } finally {
-    await closeVisualBrowser(browser, timeoutMs);
-  }
+  return withVisualBrowser("Visual browser capture", deadline, (browser) => withVisualPage(
+    browser,
+    deadline,
+    "Visual browser capture page",
+    { width, height, deviceScaleFactor: 1 },
+    async (page) => {
+      page.setDefaultTimeout(visualOperationTimeout(deadline, "Visual browser capture"));
+      page.on("console", (message) => {
+        if (message.type() === "error") consoleErrors.push(message.text().slice(0, 1000));
+      });
+      page.on("pageerror", (error) => pageErrors.push(error.message.slice(0, 1000)));
+      page.on("requestfailed", (request) => requestFailures.push(`${request.method()} ${request.url()} ${request.failure()?.errorText || "failed"}`.slice(0, 1000)));
+      await page.goto(resolved.target, { waitUntil: "domcontentloaded", timeout: visualOperationTimeout(deadline, "Visual page navigation") });
+      await waitForVisualStability(page, deadline);
+      const metrics = await withVisualDeadline("Visual page metrics", deadline, () => pageMetrics(page));
+      const documentHeight = Number(metrics.document_height) || height;
+      const documentWidth = Number(metrics.document_width) || width;
+      const useFullPage = fullPage && documentHeight <= MAX_RENDER_DIMENSION * 4 && documentWidth <= MAX_RENDER_DIMENSION;
+      const overviewPath = path.join(outputDir, "overview.png");
+      await page.screenshot({
+        path: overviewPath,
+        type: "png",
+        fullPage: useFullPage,
+        animations: "disabled",
+        timeout: visualOperationTimeout(deadline, "Visual overview screenshot"),
+      });
+      const selectorFocus = await captureSelectorFocus(page, focusItems, outputDir, deadline);
+      const machineIssues = [
+        ...pageErrors.map((error) => `Page error: ${error}`),
+        ...consoleErrors.map((error) => `Console error: ${error}`),
+        ...selectorFocus.issues,
+      ];
+      const clippedCount = Number(metrics.clipped_element_count) || 0;
+      const advisories = [
+        ...requestFailures.slice(0, 10).map((failure) => `Request failed: ${failure}`),
+        ...(clippedCount > 0 ? [`Detected ${clippedCount} element(s) with clipped/overflowing content.`] : []),
+        ...(fullPage && !useFullPage ? ["Full-page capture was bounded because the document exceeded the safe render size."] : []),
+      ];
+      return {
+        overviewPath,
+        focusPaths: selectorFocus.paths,
+        focusDetails: selectorFocus.details,
+        machineIssues,
+        advisories,
+        diagnostics: {
+          ...metrics,
+          console_errors: consoleErrors,
+          page_errors: pageErrors,
+          request_failures: requestFailures,
+          full_page_requested: fullPage,
+          full_page_captured: useFullPage,
+          browser: findVisualBrowserExecutable(),
+        },
+      };
+    }
+  ));
 }
 
 async function captureImageArtifact(
@@ -492,42 +654,37 @@ async function captureImageArtifact(
   outputDir: string,
   width: number,
   height: number,
-  timeoutMs: number
+  deadline: VisualDeadline
 ): Promise<BrowserCaptureResult> {
-  const browser = await launchVisualBrowser(timeoutMs);
-  try {
-    return await withVisualDeadline(
-      "Visual image capture",
-      browserLifecycleTimeout(timeoutMs),
-      async () => {
-        const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
-        page.setDefaultTimeout(timeoutMs);
-        const dataUrl = await imageDataUrl(sourcePath);
-        await page.setContent(
-          `<!doctype html><html><head><style>html,body{margin:0;width:100%;height:100%;background:#eef2f5;display:grid;place-items:center;overflow:hidden}img{display:block;max-width:100%;max-height:100%;object-fit:contain}</style></head><body><img id="artifact" src="${dataUrl}"></body></html>`,
-          { waitUntil: "load", timeout: timeoutMs }
-        );
-        await page.locator("#artifact").waitFor({ state: "visible", timeout: timeoutMs });
-        const dimensions = await page.locator("#artifact").evaluate((element) => {
-          const image = element as HTMLImageElement;
-          return { natural_width: image.naturalWidth, natural_height: image.naturalHeight };
-        });
-        const overviewPath = path.join(outputDir, "overview.png");
-        await page.screenshot({ path: overviewPath, type: "png", animations: "disabled", timeout: timeoutMs });
-        return {
-          overviewPath,
-          focusPaths: [],
-          focusDetails: [],
-          machineIssues: [],
-          advisories: [],
-          diagnostics: { ...dimensions, browser: findVisualBrowserExecutable() },
-        };
-      },
-      () => { void browser.close().catch(() => undefined); }
-    );
-  } finally {
-    await closeVisualBrowser(browser, timeoutMs);
-  }
+  return withVisualBrowser("Visual image capture", deadline, (browser) => withVisualPage(
+    browser,
+    deadline,
+    "Visual image capture page",
+    { width, height, deviceScaleFactor: 1 },
+    async (page) => {
+      page.setDefaultTimeout(visualOperationTimeout(deadline, "Visual image capture"));
+      const dataUrl = await imageDataUrl(sourcePath);
+      await page.setContent(
+        `<!doctype html><html><head><style>html,body{margin:0;width:100%;height:100%;background:#eef2f5;display:grid;place-items:center;overflow:hidden}img{display:block;max-width:100%;max-height:100%;object-fit:contain}</style></head><body><img id="artifact" src="${dataUrl}"></body></html>`,
+        { waitUntil: "load", timeout: visualOperationTimeout(deadline, "Visual image content") }
+      );
+      await page.locator("#artifact").waitFor({ state: "visible", timeout: visualOperationTimeout(deadline, "Visual image element") });
+      const dimensions = await page.locator("#artifact").evaluate((element) => {
+        const image = element as HTMLImageElement;
+        return { natural_width: image.naturalWidth, natural_height: image.naturalHeight };
+      });
+      const overviewPath = path.join(outputDir, "overview.png");
+      await page.screenshot({ path: overviewPath, type: "png", animations: "disabled", timeout: visualOperationTimeout(deadline, "Visual image screenshot") });
+      return {
+        overviewPath,
+        focusPaths: [],
+        focusDetails: [],
+        machineIssues: [],
+        advisories: [],
+        diagnostics: { ...dimensions, browser: findVisualBrowserExecutable() },
+      };
+    }
+  ));
 }
 
 function estimatePdfPageCount(pdfBytes: Buffer): number {
@@ -546,12 +703,31 @@ function normalizePages(requested: number[] | undefined, pageCount: number): num
   return [...new Set(values.map((value) => Math.floor(value)).filter((value) => value >= 1 && value <= pageCount))].slice(0, MAX_PAGES);
 }
 
+function isVisualTimeoutError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === "TimeoutError" || /\b(?:timed out|timeout(?: of)? .* exceeded)\b/i.test(error.message);
+}
+
+function isTransientPdfCaptureReadinessError(error: unknown): boolean {
+  const message = normalizeVisualError(error).message;
+  return /(?:unable|failed|could not) to capture (?:a )?screenshot|screenshot capture (?:is )?(?:not ready|temporarily unavailable)/i.test(message);
+}
+
+/** Internal behavioral seams used by the focused lifecycle tests. */
+export const __visualHarnessTestHooks = Object.freeze({
+  createVisualDeadline,
+  withVisualDeadline,
+  withVisualCleanup,
+  closeVisualResource,
+  isTransientPdfCaptureReadinessError,
+});
+
 async function renderPdfPages(
   pdfPath: string,
   outputDir: string,
   width: number,
   height: number,
-  timeoutMs: number,
+  deadline: VisualDeadline,
   requestedPages?: number[]
 ): Promise<{
   pagePaths: string[];
@@ -563,43 +739,88 @@ async function renderPdfPages(
   const pdfBytes = await fs.readFile(pdfPath);
   const pageCount = estimatePdfPageCount(pdfBytes);
   const pages = normalizePages(requestedPages, pageCount);
-  const browser = await launchVisualBrowser(timeoutMs);
   const pagePaths: string[] = [];
   const pageMap = new Map<number, string>();
   const errors: string[] = [];
-  try {
+  return withVisualBrowser("Visual PDF capture", deadline, async (browser) => {
     for (const pageNumber of pages) {
-      const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
-      page.setDefaultTimeout(timeoutMs);
-      page.on("pageerror", (error) => errors.push(error.message.slice(0, 1000)));
-      const target = `${pathToFileURL(pdfPath).toString()}#page=${pageNumber}&zoom=page-fit`;
-      await page.goto(target, { waitUntil: "domcontentloaded", timeout: timeoutMs });
-      await page.waitForTimeout(Math.min(1400, Math.max(500, Math.floor(timeoutMs / 20))));
-      const outputPath = path.join(outputDir, `page-${String(pageNumber).padStart(3, "0")}.png`);
-      const toolbar = Math.min(64, Math.max(0, height - 100));
-      await page.screenshot({
-        path: outputPath,
-        type: "png",
-        clip: { x: 0, y: toolbar, width, height: height - toolbar },
-        animations: "disabled",
-        timeout: timeoutMs,
-      });
+      const outputPath = await withVisualPage(
+        browser,
+        deadline,
+        `Visual PDF page ${pageNumber}`,
+        { width, height, deviceScaleFactor: 1 },
+        async (page) => {
+        page.setDefaultTimeout(visualOperationTimeout(deadline, `Visual PDF page ${pageNumber}`));
+        page.on("pageerror", (error) => errors.push(error.message.slice(0, 1000)));
+        const target = `${pathToFileURL(pdfPath).toString()}#page=${pageNumber}&zoom=page-fit`;
+        await page.goto(target, { waitUntil: "domcontentloaded", timeout: visualOperationTimeout(deadline, `Visual PDF page ${pageNumber} navigation`) });
+        try {
+          await withVisualDeadline(
+            `Visual PDF page ${pageNumber} load`,
+            deadline,
+            () => page.waitForLoadState("load", { timeout: Math.min(5_000, visualOperationTimeout(deadline, `Visual PDF page ${pageNumber} load`)) })
+          );
+        } catch (error) {
+          if (!isVisualTimeoutError(error) || deadline.remainingMs() <= 0) throw error;
+        }
+        const settleMs = Math.min(1400, Math.max(500, Math.floor(deadline.timeoutMs / 20)));
+        await withVisualDeadline(
+          `Visual PDF page ${pageNumber} stabilization`,
+          deadline,
+          () => page.waitForTimeout(Math.min(settleMs, visualOperationTimeout(deadline, `Visual PDF page ${pageNumber} stabilization`, settleMs)))
+        );
+        const toolbar = Math.min(64, Math.max(0, height - 100));
+        const outputPath = path.join(outputDir, `page-${String(pageNumber).padStart(3, "0")}.png`);
+        let screenshotError: unknown;
+        for (let attempt = 1; attempt <= MAX_PDF_SCREENSHOT_ATTEMPTS; attempt++) {
+          try {
+            await page.screenshot({
+              path: outputPath,
+              type: "png",
+              clip: { x: 0, y: toolbar, width, height: height - toolbar },
+              animations: "disabled",
+              timeout: visualOperationTimeout(deadline, `Visual PDF page ${pageNumber} screenshot`),
+            });
+            screenshotError = undefined;
+            break;
+          } catch (error) {
+            screenshotError = error;
+            if (
+              attempt === MAX_PDF_SCREENSHOT_ATTEMPTS ||
+              page.isClosed() ||
+              !isTransientPdfCaptureReadinessError(error)
+            ) break;
+            const remaining = deadline.remainingMs();
+            if (remaining <= 0) break;
+            const retryDelay = Math.max(1, Math.min(500 * attempt, 2_000, Math.floor(remaining)));
+            try {
+              await withVisualDeadline(
+                `Visual PDF page ${pageNumber} screenshot retry ${attempt}`,
+                deadline,
+                () => page.waitForTimeout(retryDelay)
+              );
+            } catch {
+              break;
+            }
+          }
+        }
+        if (screenshotError) throw screenshotError;
+        return outputPath;
+        }
+      );
       pagePaths.push(outputPath);
       pageMap.set(pageNumber, outputPath);
-      await page.close();
     }
-  } finally {
-    await closeVisualBrowser(browser, timeoutMs);
-  }
-  return {
-    pagePaths,
-    pageMap,
-    pageCount,
-    advisories: [
-      "PDF pages are captured through the installed Chromium PDF viewer; page-count detection is best-effort for unusual PDFs.",
-    ],
-    diagnostics: { requested_pages: pages, estimated_page_count: pageCount, page_errors: errors, browser: findVisualBrowserExecutable() },
-  };
+    return {
+      pagePaths,
+      pageMap,
+      pageCount,
+      advisories: [
+        "PDF pages are captured through the installed Chromium PDF viewer; page-count detection is best-effort for unusual PDFs.",
+      ],
+      diagnostics: { requested_pages: pages, estimated_page_count: pageCount, page_errors: errors, browser: findVisualBrowserExecutable() },
+    };
+  });
 }
 
 async function officeProcessIds(processName: "WINWORD" | "POWERPNT"): Promise<number[]> {
@@ -636,7 +857,7 @@ async function cleanupNewOfficeProcesses(processName: "WINWORD" | "POWERPNT", be
 async function runPowerShellScript(
   scriptPath: string,
   args: string[],
-  timeoutMs: number,
+  deadline: VisualDeadline,
   officeProcessName: "WINWORD" | "POWERPNT",
   allowOfficeRunning: boolean
 ): Promise<{ stdout: string; stderr: string }> {
@@ -645,40 +866,41 @@ async function runPowerShellScript(
   if (before.length > 0 && !allowOfficeRunning) {
     throw new Error(`${officeProcessName} is already running. Safe Office rendering was skipped to avoid touching the user's open Office session. Close it or set allow_office_running=true.`);
   }
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, ...args],
-      { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }
-    );
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    const timer = setTimeout(async () => {
-      if (settled) return;
-      settled = true;
-      await terminateProcessTree(child.pid || 0);
-      await cleanupNewOfficeProcesses(officeProcessName, before);
-      reject(new Error(`Office renderer timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-    child.stdout?.on("data", (chunk: Buffer) => { stdout = (stdout + chunk.toString()).slice(-100000); });
-    child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-100000); });
-    child.on("error", async (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      await cleanupNewOfficeProcesses(officeProcessName, before);
-      reject(error);
-    });
-    child.on("close", async (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      await cleanupNewOfficeProcesses(officeProcessName, before);
-      if (code === 0) resolve({ stdout: stdout.trim(), stderr: stderr.trim() });
-      else reject(new Error(stderr.trim() || stdout.trim() || `Office renderer exited with code ${code}`));
-    });
-  });
+  let child: ReturnType<typeof spawn> | undefined;
+  const abort = async (): Promise<void> => {
+    await terminateProcessTree(child?.pid || 0);
+    await cleanupNewOfficeProcesses(officeProcessName, before);
+  };
+  return withVisualDeadline(
+    "Office renderer",
+    deadline,
+    () => new Promise((resolve, reject) => {
+      child = spawn(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, ...args],
+        { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }
+      );
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      child.stdout?.on("data", (chunk: Buffer) => { stdout = (stdout + chunk.toString()).slice(-100000); });
+      child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-100000); });
+      child.on("error", async (error) => {
+        if (settled) return;
+        settled = true;
+        await cleanupNewOfficeProcesses(officeProcessName, before);
+        reject(error);
+      });
+      child.on("close", async (code) => {
+        if (settled) return;
+        settled = true;
+        await cleanupNewOfficeProcesses(officeProcessName, before);
+        if (code === 0) resolve({ stdout: stdout.trim(), stderr: stderr.trim() });
+        else reject(new Error(stderr.trim() || stdout.trim() || `Office renderer exited with code ${code}`));
+      });
+    }),
+    () => { void abort().catch(() => undefined); }
+  );
 }
 
 async function exportPptx(
@@ -686,7 +908,7 @@ async function exportPptx(
   outputDir: string,
   width: number,
   height: number,
-  timeoutMs: number,
+  deadline: VisualDeadline,
   allowOfficeRunning: boolean
 ): Promise<string[]> {
   const slideDir = path.join(outputDir, "slides");
@@ -710,7 +932,7 @@ try {
     await runPowerShellScript(
       scriptPath,
       ["-InputPath", sourcePath, "-OutputDir", slideDir, "-Width", String(width), "-Height", String(height)],
-      timeoutMs,
+      deadline,
       "POWERPNT",
       allowOfficeRunning
     );
@@ -730,7 +952,7 @@ try {
 async function exportDocxToPdf(
   sourcePath: string,
   outputDir: string,
-  timeoutMs: number,
+  deadline: VisualDeadline,
   allowOfficeRunning: boolean
 ): Promise<string> {
   const pdfPath = path.join(outputDir, "document.pdf");
@@ -754,7 +976,7 @@ try {
     await runPowerShellScript(
       scriptPath,
       ["-InputPath", sourcePath, "-OutputPdf", pdfPath],
-      timeoutMs,
+      deadline,
       "WINWORD",
       allowOfficeRunning
     );
@@ -766,40 +988,47 @@ try {
   return pdfPath;
 }
 
-async function createContactSheet(imagePaths: string[], outputPath: string, timeoutMs: number): Promise<string> {
+async function createContactSheet(imagePaths: string[], outputPath: string, deadline: VisualDeadline): Promise<string> {
   if (imagePaths.length === 1) return imagePaths[0];
-  const cards = await Promise.all(imagePaths.slice(0, MAX_PAGES).map(async (imagePath, index) => {
+  const cards = await withVisualDeadline("Visual contact sheet image loading", deadline, () => Promise.all(imagePaths.slice(0, MAX_PAGES).map(async (imagePath, index) => {
     const dataUrl = await imageDataUrl(imagePath);
     return `<figure><figcaption>Page ${index + 1}</figcaption><img src="${dataUrl}"></figure>`;
-  }));
-  const browser = await launchVisualBrowser(timeoutMs);
-  try {
-    const page = await browser.newPage({ viewport: { width: 1600, height: 1000 }, deviceScaleFactor: 1 });
-    page.setDefaultTimeout(timeoutMs);
+  })));
+  return withVisualBrowser("Visual contact sheet", deadline, (browser) => withVisualPage(
+    browser,
+    deadline,
+    "Visual contact sheet page",
+    { width: 1600, height: 1000, deviceScaleFactor: 1 },
+    async (page) => {
+    page.setDefaultTimeout(visualOperationTimeout(deadline, "Visual contact sheet"));
     await page.setContent(
       `<!doctype html><html><head><style>body{margin:0;padding:24px;background:#e9eef2;font:18px sans-serif;color:#243746}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px}figure{margin:0;background:white;border-radius:12px;padding:12px;box-shadow:0 3px 14px #0002}figcaption{font-weight:700;margin:0 0 8px}img{display:block;width:100%;height:360px;object-fit:contain;background:#f7f8fa}</style></head><body><div class="grid">${cards.join("")}</div></body></html>`,
-      { waitUntil: "load", timeout: timeoutMs }
+      { waitUntil: "load", timeout: visualOperationTimeout(deadline, "Visual contact sheet content") }
     );
-    await page.screenshot({ path: outputPath, type: "png", fullPage: true, animations: "disabled", timeout: timeoutMs });
+    await page.screenshot({
+      path: outputPath,
+      type: "png",
+      fullPage: true,
+      animations: "disabled",
+      timeout: visualOperationTimeout(deadline, "Visual contact sheet screenshot"),
+    });
     return outputPath;
-  } finally {
-    await closeVisualBrowser(browser, timeoutMs);
-  }
+    }
+  ));
 }
 
 async function cropRasterRegions(
   pageMap: Map<number, string>,
   focuses: VisualFocusInput[],
   outputDir: string,
-  timeoutMs: number
+  deadline: VisualDeadline
 ): Promise<{ paths: string[]; details: Array<Record<string, unknown>>; issues: string[] }> {
   const regionFocus = focuses.filter((focus) => focus.x !== undefined || focus.y !== undefined || focus.width !== undefined || focus.height !== undefined).slice(0, MAX_FOCUS);
   if (regionFocus.length === 0) return { paths: [], details: [], issues: [] };
-  const browser = await launchVisualBrowser(timeoutMs);
   const paths: string[] = [];
   const details: Array<Record<string, unknown>> = [];
   const issues: string[] = [];
-  try {
+  return withVisualBrowser("Visual raster focus capture", deadline, async (browser) => {
     for (let index = 0; index < regionFocus.length; index++) {
       const focus = regionFocus[index];
       const pageNumber = Math.max(1, Math.floor(focus.page || 1));
@@ -808,36 +1037,65 @@ async function cropRasterRegions(
         issues.push(`Requested focus page was not rendered: ${pageNumber}`);
         continue;
       }
-      const dataUrl = await imageDataUrl(sourcePath);
-      const page = await browser.newPage({ viewport: { width: 100, height: 100 }, deviceScaleFactor: 1 });
-      page.setDefaultTimeout(timeoutMs);
-      await page.setContent(`<html><body style="margin:0"><img id="artifact" style="display:block" src="${dataUrl}"></body></html>`, { waitUntil: "load", timeout: timeoutMs });
-      const dimensions = await page.locator("#artifact").evaluate((element) => {
-        const image = element as HTMLImageElement;
-        return { width: image.naturalWidth, height: image.naturalHeight };
-      });
-      await page.setViewportSize({ width: Math.max(1, Math.min(MAX_RENDER_DIMENSION, dimensions.width)), height: Math.max(1, Math.min(MAX_RENDER_DIMENSION, dimensions.height)) });
-      const ratio = focus.unit !== "px";
-      const x = ratio ? (focus.x ?? 0) * dimensions.width : (focus.x ?? 0);
-      const y = ratio ? (focus.y ?? 0) * dimensions.height : (focus.y ?? 0);
-      const width = ratio ? (focus.width ?? 1) * dimensions.width : (focus.width ?? dimensions.width);
-      const height = ratio ? (focus.height ?? 1) * dimensions.height : (focus.height ?? dimensions.height);
-      const clip = {
-        x: Math.max(0, Math.min(dimensions.width - 1, x)),
-        y: Math.max(0, Math.min(dimensions.height - 1, y)),
-        width: Math.max(1, Math.min(dimensions.width - Math.max(0, x), width)),
-        height: Math.max(1, Math.min(dimensions.height - Math.max(0, y), height)),
-      };
       const outputPath = path.join(outputDir, `region-${String(index + 1).padStart(2, "0")}.png`);
-      await page.screenshot({ path: outputPath, type: "png", clip, animations: "disabled", timeout: timeoutMs });
-      await page.close();
+      const captured = await withVisualPage(
+        browser,
+        deadline,
+        `Visual raster focus ${index + 1}`,
+        { width: 100, height: 100, deviceScaleFactor: 1 },
+        async (page) => {
+          page.setDefaultTimeout(visualOperationTimeout(deadline, `Visual raster focus ${index + 1}`));
+          const dataUrl = await withVisualDeadline(
+            `Visual raster focus ${index + 1} image loading`,
+            deadline,
+            () => imageDataUrl(sourcePath)
+          );
+          await page.setContent(
+            `<html><body style="margin:0"><img id="artifact" style="display:block" src="${dataUrl}"></body></html>`,
+            { waitUntil: "load", timeout: visualOperationTimeout(deadline, `Visual raster focus ${index + 1} content`) }
+          );
+          const dimensions = await withVisualDeadline(
+            `Visual raster focus ${index + 1} dimensions`,
+            deadline,
+            () => page.locator("#artifact").evaluate((element) => {
+              const image = element as HTMLImageElement;
+              return { width: image.naturalWidth, height: image.naturalHeight };
+            })
+          );
+          await withVisualDeadline(
+            `Visual raster focus ${index + 1} viewport`,
+            deadline,
+            () => page.setViewportSize({
+              width: Math.max(1, Math.min(MAX_RENDER_DIMENSION, dimensions.width)),
+              height: Math.max(1, Math.min(MAX_RENDER_DIMENSION, dimensions.height)),
+            })
+          );
+          const ratio = focus.unit !== "px";
+          const x = ratio ? (focus.x ?? 0) * dimensions.width : (focus.x ?? 0);
+          const y = ratio ? (focus.y ?? 0) * dimensions.height : (focus.y ?? 0);
+          const width = ratio ? (focus.width ?? 1) * dimensions.width : (focus.width ?? dimensions.width);
+          const height = ratio ? (focus.height ?? 1) * dimensions.height : (focus.height ?? dimensions.height);
+          const clip = {
+            x: Math.max(0, Math.min(dimensions.width - 1, x)),
+            y: Math.max(0, Math.min(dimensions.height - 1, y)),
+            width: Math.max(1, Math.min(dimensions.width - Math.max(0, x), width)),
+            height: Math.max(1, Math.min(dimensions.height - Math.max(0, y), height)),
+          };
+          await page.screenshot({
+            path: outputPath,
+            type: "png",
+            clip,
+            animations: "disabled",
+            timeout: visualOperationTimeout(deadline, `Visual raster focus ${index + 1} screenshot`),
+          });
+          return clip;
+        }
+      );
       paths.push(outputPath);
-      details.push({ label: focus.label || `Page ${pageNumber} region`, page: pageNumber, unit: focus.unit || "ratio", clip, crop_path: outputPath });
+      details.push({ label: focus.label || `Page ${pageNumber} region`, page: pageNumber, unit: focus.unit || "ratio", clip: captured, crop_path: outputPath });
     }
-  } finally {
-    await closeVisualBrowser(browser, timeoutMs);
-  }
-  return { paths, details, issues };
+    return { paths, details, issues };
+  });
 }
 
 async function resolveComparisonTarget(
@@ -858,39 +1116,51 @@ async function createComparison(
   baselinePath: string,
   currentPath: string,
   outputPath: string,
-  timeoutMs: number
+  deadline: VisualDeadline
 ): Promise<Record<string, unknown>> {
-  const before = await imageDataUrl(baselinePath);
-  const after = await imageDataUrl(currentPath);
-  const browser = await launchVisualBrowser(timeoutMs);
-  try {
-    const page = await browser.newPage({ viewport: { width: 1500, height: 950 }, deviceScaleFactor: 1 });
-    page.setDefaultTimeout(timeoutMs);
+  const [before, after] = await withVisualDeadline(
+    "Visual comparison image loading",
+    deadline,
+    () => Promise.all([imageDataUrl(baselinePath), imageDataUrl(currentPath)])
+  );
+  return withVisualBrowser("Visual comparison", deadline, (browser) => withVisualPage(
+    browser,
+    deadline,
+    "Visual comparison page",
+    { width: 1500, height: 950, deviceScaleFactor: 1 },
+    async (page) => {
+    page.setDefaultTimeout(visualOperationTimeout(deadline, "Visual comparison"));
     await page.setContent(
       `<!doctype html><html><head><style>body{margin:0;padding:22px;background:#e9eef2;font:18px sans-serif;color:#243746}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.card{background:white;padding:12px;border-radius:12px}.card h2{margin:0 0 8px;font-size:20px}.card img,.card canvas{display:block;width:100%;height:520px;object-fit:contain;background:#f7f8fa}.diff{grid-column:1/-1}</style></head><body><div class="grid"><section class="card"><h2>Before</h2><img id="before" src="${before}"></section><section class="card"><h2>After</h2><img id="after" src="${after}"></section><section class="card diff"><h2>Pixel difference</h2><canvas id="diff"></canvas></section></div><script>Promise.all([new Promise(r=>before.onload=r),new Promise(r=>after.onload=r)]).then(()=>{const w=Math.max(1,Math.min(before.naturalWidth,after.naturalWidth,1200));const h=Math.max(1,Math.min(before.naturalHeight,after.naturalHeight,800));const a=document.createElement('canvas');const b=document.createElement('canvas');a.width=b.width=diff.width=w;a.height=b.height=diff.height=h;const ac=a.getContext('2d'),bc=b.getContext('2d'),dc=diff.getContext('2d');ac.drawImage(before,0,0,w,h);bc.drawImage(after,0,0,w,h);const ad=ac.getImageData(0,0,w,h),bd=bc.getImageData(0,0,w,h),out=dc.createImageData(w,h);let changed=0,total=0;for(let i=0;i<ad.data.length;i+=4){const d=Math.abs(ad.data[i]-bd.data[i])+Math.abs(ad.data[i+1]-bd.data[i+1])+Math.abs(ad.data[i+2]-bd.data[i+2]);total+=d;if(d>36)changed++;out.data[i]=Math.min(255,d);out.data[i+1]=0;out.data[i+2]=0;out.data[i+3]=255;}dc.putImageData(out,0,0);window.__metrics={width:w,height:h,changed_pixel_ratio:changed/(w*h),mean_absolute_difference:total/(w*h*3)};window.__ready=true;});</script></body></html>`,
-      { waitUntil: "load", timeout: timeoutMs }
+      { waitUntil: "load", timeout: visualOperationTimeout(deadline, "Visual comparison content") }
     );
-    await page.waitForFunction(() => (window as Window & { __ready?: boolean }).__ready === true, undefined, { timeout: timeoutMs });
+    await page.waitForFunction(() => (window as Window & { __ready?: boolean }).__ready === true, undefined, { timeout: visualOperationTimeout(deadline, "Visual comparison readiness") });
     const metrics = await page.evaluate(() => (window as Window & { __metrics?: Record<string, unknown> }).__metrics || {});
-    await page.screenshot({ path: outputPath, type: "png", fullPage: true, animations: "disabled", timeout: timeoutMs });
+    await page.screenshot({
+      path: outputPath,
+      type: "png",
+      fullPage: true,
+      animations: "disabled",
+      timeout: visualOperationTimeout(deadline, "Visual comparison screenshot"),
+    });
     return metrics;
-  } finally {
-    await closeVisualBrowser(browser, timeoutMs);
-  }
+    }
+  ));
 }
 
 async function renderArtifact(
   resolved: ResolvedTarget,
   kind: VisualArtifactKind,
   outputDir: string,
+  deadline: VisualDeadline,
   input: Required<Pick<VisualReviewInput, "width" | "height" | "timeout_ms" | "full_page" | "allow_office_running">> & Pick<VisualReviewInput, "pages" | "focus">
 ): Promise<RenderResult> {
   const focus = input.focus || [];
   if (kind === "image") {
     if (!resolved.sourcePath) throw new Error("Image review requires a local file");
-    const captured = await captureImageArtifact(resolved.sourcePath, outputDir, input.width, input.height, input.timeout_ms);
+    const captured = await captureImageArtifact(resolved.sourcePath, outputDir, input.width, input.height, deadline);
     const pageMap = new Map<number, string>([[1, captured.overviewPath]]);
-    const regions = await cropRasterRegions(pageMap, focus, outputDir, input.timeout_ms);
+    const regions = await cropRasterRegions(pageMap, focus, outputDir, deadline);
     return {
       renderer: "chromium-image",
       overviewPath: captured.overviewPath,
@@ -910,12 +1180,12 @@ async function renderArtifact(
       outputDir,
       input.width,
       input.height,
-      input.timeout_ms,
+      deadline,
       input.full_page,
       focus.filter((item) => Boolean(item.selector))
     );
     const pageMap = new Map<number, string>([[1, captured.overviewPath]]);
-    const regions = await cropRasterRegions(pageMap, focus, outputDir, input.timeout_ms);
+    const regions = await cropRasterRegions(pageMap, focus, outputDir, deadline);
     return {
       renderer: kind === "svg" ? "playwright-svg" : "playwright-page",
       overviewPath: captured.overviewPath,
@@ -932,9 +1202,9 @@ async function renderArtifact(
   if (!resolved.sourcePath) throw new Error(`${kind.toUpperCase()} review requires a local file`);
 
   if (kind === "pdf") {
-    const rendered = await renderPdfPages(resolved.sourcePath, outputDir, input.width, input.height, input.timeout_ms, input.pages);
-    const overviewPath = await createContactSheet(rendered.pagePaths, path.join(outputDir, "overview.png"), input.timeout_ms);
-    const regions = await cropRasterRegions(rendered.pageMap, focus, outputDir, input.timeout_ms);
+    const rendered = await renderPdfPages(resolved.sourcePath, outputDir, input.width, input.height, deadline, input.pages);
+    const overviewPath = await createContactSheet(rendered.pagePaths, path.join(outputDir, "overview.png"), deadline);
+    const regions = await cropRasterRegions(rendered.pageMap, focus, outputDir, deadline);
     return {
       renderer: "chromium-pdf-viewer",
       overviewPath,
@@ -949,12 +1219,12 @@ async function renderArtifact(
   }
 
   if (kind === "pptx") {
-    const allSlides = await exportPptx(resolved.sourcePath, outputDir, input.width, input.height, input.timeout_ms, input.allow_office_running);
+    const allSlides = await exportPptx(resolved.sourcePath, outputDir, input.width, input.height, deadline, input.allow_office_running);
     const selectedPages = normalizePages(input.pages, allSlides.length);
     const pageMap = new Map<number, string>(allSlides.map((slide, index) => [index + 1, slide]));
     const pagePaths = selectedPages.map((pageNumber) => pageMap.get(pageNumber)!).filter(Boolean);
-    const overviewPath = await createContactSheet(pagePaths, path.join(outputDir, "overview.png"), input.timeout_ms);
-    const regions = await cropRasterRegions(pageMap, focus, outputDir, input.timeout_ms);
+    const overviewPath = await createContactSheet(pagePaths, path.join(outputDir, "overview.png"), deadline);
+    const regions = await cropRasterRegions(pageMap, focus, outputDir, deadline);
     return {
       renderer: "powerpoint-com",
       overviewPath,
@@ -968,10 +1238,10 @@ async function renderArtifact(
     };
   }
 
-  const pdfPath = await exportDocxToPdf(resolved.sourcePath, outputDir, input.timeout_ms, input.allow_office_running);
-  const rendered = await renderPdfPages(pdfPath, outputDir, input.width, input.height, input.timeout_ms, input.pages);
-  const overviewPath = await createContactSheet(rendered.pagePaths, path.join(outputDir, "overview.png"), input.timeout_ms);
-  const regions = await cropRasterRegions(rendered.pageMap, focus, outputDir, input.timeout_ms);
+  const pdfPath = await exportDocxToPdf(resolved.sourcePath, outputDir, deadline, input.allow_office_running);
+  const rendered = await renderPdfPages(pdfPath, outputDir, input.width, input.height, deadline, input.pages);
+  const overviewPath = await createContactSheet(rendered.pagePaths, path.join(outputDir, "overview.png"), deadline);
+  const regions = await cropRasterRegions(rendered.pageMap, focus, outputDir, deadline);
   return {
     renderer: "word-com-to-pdf-to-chromium",
     overviewPath,
@@ -986,15 +1256,16 @@ async function renderArtifact(
 }
 
 export async function performVisualReview(workspaceRoot: string, input: VisualReviewInput): Promise<VisualReviewExecution> {
+  const timeoutMs = clampInteger(input.timeout_ms, 30_000, 1_000, 120_000);
+  const deadline = createVisualDeadline(timeoutMs);
   const resolved = await resolveTarget(input.target);
   const kind = detectKind(resolved, input.kind);
   const width = clampInteger(input.width, kind === "svg" ? 1200 : 1440, 320, 2400);
   const height = clampInteger(input.height, kind === "svg" ? 800 : 1000, 240, 1800);
-  const timeoutMs = clampInteger(input.timeout_ms, 30_000, 1_000, 120_000);
   const maxImages = clampInteger(input.max_images, 12, 1, 12);
   const outputDir = await createOutputDirectory(workspaceRoot, input.output_dir);
   const signatureBefore = resolved.sourcePath ? await fileSignature(resolved.sourcePath) : undefined;
-  const rendered = await renderArtifact(resolved, kind, outputDir, {
+  const rendered = await renderArtifact(resolved, kind, outputDir, deadline, {
     width,
     height,
     timeout_ms: timeoutMs,
@@ -1007,11 +1278,23 @@ export async function performVisualReview(workspaceRoot: string, input: VisualRe
   let comparisonPath: string | undefined;
   let comparisonMetrics: Record<string, unknown> | undefined;
   let baselineReviewId: string | undefined;
+  let effectiveQualityBar: VisualQualityBar = input.quality_bar ?? "standard";
   if (input.compare_to?.trim()) {
     const baseline = await resolveComparisonTarget(workspaceRoot, input.compare_to);
     comparisonPath = path.join(outputDir, "comparison.png");
-    comparisonMetrics = await createComparison(baseline.path, rendered.overviewPath, comparisonPath, timeoutMs);
+    comparisonMetrics = await createComparison(baseline.path, rendered.overviewPath, comparisonPath, deadline);
     baselineReviewId = baseline.reviewId;
+    if (baselineReviewId) {
+      const baselineRecord = await getVisualReviewRecord(workspaceRoot, baselineReviewId);
+      const baselineQualityBar = baselineRecord.quality_bar ?? "standard";
+      if (
+        input.quality_bar &&
+        VISUAL_QUALITY_BAR_RANK[input.quality_bar] < VISUAL_QUALITY_BAR_RANK[baselineQualityBar]
+      ) {
+        throw new Error(`Cannot lower visual quality_bar from ${baselineQualityBar} to ${input.quality_bar} after reviewing an earlier iteration. Keep or raise the locked delivery bar.`);
+      }
+      effectiveQualityBar = input.quality_bar ?? baselineQualityBar;
+    }
   }
 
   const signature = resolved.sourcePath ? await fileSignature(resolved.sourcePath) : undefined;
@@ -1070,6 +1353,7 @@ export async function performVisualReview(workspaceRoot: string, input: VisualRe
   const record = await saveVisualReviewRecord(workspaceRoot, {
     target: resolved.label,
     kind,
+    quality_bar: effectiveQualityBar,
     renderer: rendered.renderer,
     source_path: resolved.sourcePath,
     source_signature: signature?.signature,
@@ -1099,12 +1383,14 @@ export async function performVisualReview(workspaceRoot: string, input: VisualRe
       review_id: record.id,
       target: resolved.label,
       kind,
+      quality_bar: effectiveQualityBar,
       renderer: rendered.renderer,
       visual_status: rendered.machineIssues.length === 0 ? "rendered_current" : "rendered_with_blocking_issues",
       render_status: rendered.machineIssues.length === 0 ? "clean" : "blocked",
       model_visual_status: "pending",
+      model_visual_critique_required: true,
       model_visual_assessment_required: true,
-      model_visual_instruction: `Inspect every returned full render/page image with model vision. Do not infer visual quality from machine_blocking_issues. Then call visual_review action=assess with this review_id and inspected_full_render=true. If compare pixels are returned, judge whether the new version improved, regressed, or stayed unchanged. Record strengths and whether another improvement iteration is worthwhile. Before setting further_improvement_worthwhile=false, judge the current artifact independently of how much it improved over the prior version: improvement versus before is not proof that the current version is finished. If a clear worthwhile visual improvement remains and the iteration budget is not exhausted, revise the real source and use compare_to=<prior review_id> for the next review. The universal visual loop is capped at ${MAX_VISUAL_ITERATIONS} iterations for every supported artifact kind; reaching the cap stops autonomous refinement but never bypasses fail, machine-blocking, page-coverage, or source-freshness gates. For paged artifacts, continue with recommended_next_pages until model_visual_coverage.complete is true.`,
+      model_visual_instruction: `Inspect every returned full render/page image with model vision as an external reviewer seeing the artifact for the first time. Ignore creator effort, elapsed work, Goal completion pressure, and the fact that the file parsed or rendered. Semantic recognizability is not finished-product visual quality. First call visual_review action=critique with this review_id and inspected_full_render=true. Critique is issue-first and has no PASS authority: record first_impression, delivery_recommendation, all six 1-5 quality_scores, issue severity, strengths, and whether a concrete high-value improvement remains. Calibrate scores strictly: 1=broken/unacceptable, 2=weak, 3=competent but visibly rough or unfinished, 4=solid finished/presentable work you would hand to the user unchanged, 5=exceptional. Do not give 4+ merely because the artifact is recognizable, complete, or better than before. delivery_recommendation=accept means you would actually deliver this exact visible version unchanged at the locked quality bar. Use improvement_opportunities only for changes that are genuinely worth another revision; put low-value optional polish in minor_issues. After Critic succeeds, call action=assess for semantic/task correctness and comparison judgment. Delivery is allowed only when the server-calculated quality gate is acceptable, semantic assessment passes, coverage is complete, the source is fresh, and no required refinement remains. If quality is failed or improvable, revise the real source and run visual_review again with compare_to=<prior review_id>. The quality bar for this chain is ${effectiveQualityBar} and cannot be lowered after seeing a weak iteration. The universal visual loop is capped at ${MAX_VISUAL_ITERATIONS} source versions for every supported artifact kind; reaching the cap stops autonomous refinement but never converts a failed quality gate into PASS. For paged artifacts, continue with recommended_next_pages until model_visual_coverage.complete is true.`,
       source_signature: signature?.signature,
       overview_path: rendered.overviewPath,
       output_paths: outputPaths,

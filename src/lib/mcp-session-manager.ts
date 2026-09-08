@@ -8,9 +8,11 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpServer } from "../server-factory.js";
+import { resetHarnessSnapshotRetention } from "./context-broker.js";
 import { getUpstreamManager } from "./mcp-upstream-manager.js";
 import { refreshProxiedTools } from "./mcp-tool-proxy.js";
 import { runCodexSessionStartHooks } from "./codex-hooks.js";
+import { runWithMcpRequestIdentity } from "./mcp-request-identity.js";
 
 
 const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
@@ -284,6 +286,9 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
         };
         clearPendingRecovery(sid);
         enforceSessionLimit(sid);
+        // Per-session snapshot retention: a fresh ChatGPT conversation must
+        // re-receive the harness snapshot on its first tool result.
+        resetHarnessSnapshotRetention(config.workspaceRoot, sid);
         console.log(`[MCP] Session initialized: ${sid}`);
       },
       onsessionclosed: (sid) => {
@@ -416,7 +421,9 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
         initializingServers.add(session.server);
         if (sid) beginSessionRequest(sid);
         try {
-          await session.transport.handleRequest(req, res, body);
+          await runWithMcpRequestIdentity(req.headers, sid, () =>
+            session.transport.handleRequest(req, res, body)
+          );
           const activeSid = session.transport.sessionId;
           if (activeSid) touch(activeSid);
         } finally {
@@ -445,7 +452,9 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
       const run = async () => {
         if (sid) beginSessionRequest(sid);
         try {
-          await session.transport.handleRequest(req, res, body);
+          await runWithMcpRequestIdentity(req.headers, sid, () =>
+            session.transport.handleRequest(req, res, body)
+          );
         } finally {
           if (sid) endSessionRequest(sid);
         }
@@ -500,7 +509,9 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
       await enqueueSessionOp(staleSessionId, async () => {
         beginSessionRequest(staleSessionId);
         try {
-          await recovered.transport.handleRequest(patchedReq, res, body);
+          await runWithMcpRequestIdentity(patchedReq.headers, staleSessionId, () =>
+            recovered.transport.handleRequest(patchedReq, res, body)
+          );
         } finally {
           endSessionRequest(staleSessionId);
         }

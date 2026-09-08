@@ -1,7 +1,10 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { McpUpstreamManager } from "../lib/mcp-upstream-manager.js";
 import { audit } from "../lib/audit.js";
+import { getResolvedProxyOwner } from "../lib/mcp-tool-proxy.js";
+import { getRuntimeScope } from "../lib/runtime-scope.js";
 import { toolAnnotations } from "../lib/tool-annotations.js";
 import { toolResult } from "../lib/tool-result.js";
 
@@ -17,9 +20,10 @@ export function registerMcpBridgeTools(server: McpServer, manager: McpUpstreamMa
       },
       annotations: toolAnnotations("read"),
     },
-    async ({ refresh }) => {
-      if (refresh) await manager.reloadConfig();
-      const servers = await manager.listStatuses();
+    async ({ refresh }, extra) => {
+      const options = requestOptions(extra);
+      if (refresh) await manager.reloadConfig(options);
+      const servers = await manager.listStatuses(options);
       await audit({ tool: "mcp_servers", action: "list", status: "ok", details: { count: servers.length } });
       return toolResult("mcp_servers", { servers, count: servers.length });
     }
@@ -35,11 +39,26 @@ export function registerMcpBridgeTools(server: McpServer, manager: McpUpstreamMa
       },
       annotations: toolAnnotations("read"),
     },
-    async ({ server_id }) => {
+    async ({ server_id }, extra) => {
       const config = manager.getServerConfig(server_id);
       if (!config) throw new Error(`Unknown server_id: ${server_id}`);
-      const tools = await manager.listTools(server_id);
-      const proxied = manager.getProxiedToolNames(config, tools);
+      const tools = await manager.listTools(server_id, requestOptions(extra));
+      const candidates = new Set(manager.getProxiedToolNames(config, tools));
+      const projected = tools.map((tool) => {
+        const proxyName = `${config.tool_prefix ?? config.id}__${tool.name}`;
+        const owner = candidates.has(proxyName)
+          ? getResolvedProxyOwner(server, proxyName)
+          : undefined;
+        const isResolvedOwner =
+          owner?.ownerId === server_id && owner.upstreamToolName === tool.name;
+        return {
+          tool,
+          proxyName,
+          owner,
+          proxiedAs: isResolvedOwner ? [proxyName] : [],
+        };
+      });
+      const proxied = projected.flatMap(({ proxiedAs }) => proxiedAs);
       await audit({
         tool: "mcp_tools",
         action: "list",
@@ -49,7 +68,12 @@ export function registerMcpBridgeTools(server: McpServer, manager: McpUpstreamMa
       });
       return toolResult("mcp_tools", {
         server_id,
-        tools: tools.map((t) => ({ name: t.name, description: t.description, proxied_as: proxied.filter((p) => p.endsWith(`__${t.name}`)) })),
+        tools: projected.map(({ tool, owner, proxiedAs }) => ({
+          name: tool.name,
+          description: tool.description,
+          proxied_as: proxiedAs,
+          proxy_owner: owner?.ownerId ?? null,
+        })),
         proxied_tools: proxied,
         count: tools.length,
       });
@@ -68,12 +92,12 @@ export function registerMcpBridgeTools(server: McpServer, manager: McpUpstreamMa
       },
       annotations: toolAnnotations("edit"),
     },
-    async ({ server_id, tool, arguments: args }) => {
+    async ({ server_id, tool, arguments: args }, extra) => {
       const config = manager.getServerConfig(server_id);
       if (!config) throw new Error(`Unknown server_id: ${server_id}`);
       if (!config.enabled) throw new Error(`Upstream server disabled: ${server_id}`);
 
-      const raw = await manager.callTool(server_id, tool, args ?? {});
+      const raw = await manager.callTool(server_id, tool, args ?? {}, requestOptions(extra));
       const payload = normalizeCallResult(raw);
       await audit({
         tool: "mcp_call",
@@ -92,6 +116,11 @@ export function registerMcpBridgeTools(server: McpServer, manager: McpUpstreamMa
       );
     }
   );
+}
+
+function requestOptions(extra?: { signal?: AbortSignal }): RequestOptions | undefined {
+  const signal = extra?.signal ?? getRuntimeScope()?.signal;
+  return signal ? { signal } : undefined;
 }
 
 function normalizeCallResult(raw: unknown): { ok: boolean; summary: string; data: Record<string, unknown> } {

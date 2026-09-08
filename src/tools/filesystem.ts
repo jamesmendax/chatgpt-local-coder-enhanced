@@ -1061,7 +1061,7 @@ export function registerFilesystemTools(server: McpServer, workspaceRoot: string
       description: "Delete a file from the filesystem.",
       inputSchema: { path: z.string() },
 
-      annotations: toolAnnotations("edit"),
+      annotations: toolAnnotations("destructive"),
     },
     async ({ path: filePath }) => {
       requireWriteAllowed();
@@ -1101,7 +1101,7 @@ export function registerFilesystemTools(server: McpServer, workspaceRoot: string
         "Remove a folder from the local workspace (user-specified path). Does not affect remote servers.",
       inputSchema: { path: z.string() },
 
-      annotations: toolAnnotations("edit"),
+      annotations: toolAnnotations("destructive"),
     },
     async ({ path: dirPath }) => {
       requireWriteAllowed();

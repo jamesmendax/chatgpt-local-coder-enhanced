@@ -7,7 +7,7 @@ import { requireWriteAllowed } from "../lib/permissions.js";
 import { toolAnnotations } from "../lib/tool-annotations.js";
 import { toolResult } from "../lib/tool-result.js";
 import { compactOutput } from "../lib/command-observation.js";
-import { createCommandLogFile } from "../lib/persistent-shell.js";
+import { createCommandLogFile, terminateProcessTree } from "../lib/persistent-shell.js";
 
 const MAX_GIT_CAPTURE_CHARS = Math.max(
   20_000,
@@ -31,7 +31,7 @@ interface GitRunResult {
   full_output_path?: string;
 }
 
-function runGit(args: string[], cwd: string): Promise<GitRunResult> {
+function runGit(args: string[], cwd: string, timeoutMs = 120_000): Promise<GitRunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn("git", args, { cwd, windowsHide: true });
     const log = createCommandLogFile(cwd);
@@ -41,14 +41,24 @@ function runGit(args: string[], cwd: string): Promise<GitRunResult> {
     let stdoutChars = 0;
     let stderrChars = 0;
     let settled = false;
+    let timedOut = false;
+
+    // git push/pull can block indefinitely on a credential prompt or network —
+    // without this deadline the tool call hangs forever.
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminateProcessTree(child);
+    }, timeoutMs);
 
     const finish = (result: GitRunResult, trailer: string): void => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       if (!log.stream) {
         resolve(result);
         return;
       }
+      log.stream.once("error", () => resolve(result));
       log.stream.end(trailer, () => resolve(result));
     };
 
@@ -68,13 +78,13 @@ function runGit(args: string[], cwd: string): Promise<GitRunResult> {
       const exitCode = code ?? 1;
       finish({
         stdout: stdout.trim(),
-        stderr: stderr.trim(),
-        exit_code: exitCode,
+        stderr: timedOut ? `${stderr.trim()}${stderr.trim() ? "\n" : ""}git timed out after ${timeoutMs}ms (process tree terminated)`.trim() : stderr.trim(),
+        exit_code: timedOut ? 124 : exitCode,
         stdout_chars: stdoutChars,
         stderr_chars: stderrChars,
         output_truncated: stdoutChars > stdout.length || stderrChars > stderr.length,
         ...(log.path ? { full_output_path: log.path } : {}),
-      }, `\n# exit: ${exitCode}\n`);
+      }, `\n# exit: ${exitCode}${timedOut ? " (timed_out: true)" : ""}\n`);
     });
     child.on("error", () => {
       if (settled) return;

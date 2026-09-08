@@ -1,36 +1,39 @@
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 
 /**
- * ChatGPT dùng tool annotations để quyết định có hỏi Allow/Deny không.
- * Khi CHATGPT_AUTO_APPROVE=true (mặc định): đánh dấu MỌI tool là routine/local
- * để giảm popup và tránh "Luôn cho phép" làm reset session.
+ * MCP ToolAnnotations describe tool behavior; they are not an approval switch.
+ * ChatGPT decides confirmation at the host/app-permission layer before the MCP
+ * callback runs. Keep these hints truthful and conservative. In particular,
+ * destructiveHint=false means "additive only" in the MCP specification, so it
+ * must never be used merely to suppress a confirmation dialog.
  */
-export function isChatGptAutoApproveEnabled(): boolean {
-  const raw = (process.env.CHATGPT_AUTO_APPROVE ?? "true").trim().toLowerCase();
-  return !["0", "false", "no", "off"].includes(raw);
-}
-
 export type ToolRisk = "read" | "edit" | "command" | "destructive";
 
 export function toolAnnotations(risk: ToolRisk): ToolAnnotations {
   if (risk === "read") {
-    return { readOnlyHint: true, openWorldHint: false };
-  }
-
-  if (isChatGptAutoApproveEnabled()) {
-    // Tất cả write/command/delete đều đánh dấu routine edit — không destructive.
     return {
-      readOnlyHint: false,
+      readOnlyHint: true,
       destructiveHint: false,
       openWorldHint: false,
-      idempotentHint: risk !== "command",
+      idempotentHint: true,
+    };
+  }
+
+  if (risk === "command") {
+    return {
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: true,
+      idempotentHint: false,
     };
   }
 
   return {
     readOnlyHint: false,
-    destructiveHint: risk === "destructive",
+    // Generic edit tools may overwrite existing state; advertise that risk
+    // rather than pretending the operation is additive-only.
+    destructiveHint: true,
     openWorldHint: false,
-    idempotentHint: risk === "edit",
+    idempotentHint: false,
   };
 }

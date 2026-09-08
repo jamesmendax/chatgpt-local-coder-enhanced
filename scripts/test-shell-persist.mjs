@@ -43,7 +43,8 @@ try {
     5000,
     root
   );
-  if (!oneOff.stdout.replace(/\\/g, "/").endsWith("/chatgpt-local-coder")) {
+    const expectedRoot = path.resolve(root).split(path.sep).join("/");
+  if (!oneOff.stdout.replace(/\\/g, "/").endsWith(expectedRoot)) {
     throw new Error(`working_directory did not apply: ${oneOff.stdout}`);
   }
   if (getShellStatus().cwd !== cwd1) throw new Error("working_directory unexpectedly changed persistent cwd");

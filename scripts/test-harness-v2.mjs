@@ -32,6 +32,7 @@ const {
   HARNESS_LOG_VERSION,
 } = await import("../dist/lib/harness-events.js");
 const { buildHarnessRuntimeContext, appendHarnessRuntimeContextToResult, resetHarnessSnapshotRetention, formatHarnessRuntimeContext } = await import("../dist/lib/context-broker.js");
+const { ensureGoalRunAuthority } = await import("../dist/lib/goal-run-web.js");
 
 try {
   const parsed = extractAbsolutePathsFromText(`修改 ${projectA} 然后继续说明，不要把后面的文字吞进路径`);
@@ -55,6 +56,7 @@ try {
     success_criteria: [{ name: "fixture passes", passed: false }],
     current_phase: "Inspect project scope",
   });
+  await ensureGoalRunAuthority(workspace, goal);
   const task = await createDurableTask(workspace, {
     goal: `Work only inside ${projectA}`,
     current_step: "Run focused checks",
@@ -112,6 +114,10 @@ try {
   }, { toolName: "fixture" });
   assert.equal(augmented.structuredContent?.data?.harness_context?.task?.task_id, task.id, "structured harness context missing");
   assert.ok(JSON.stringify(augmented.content).includes("HARNESS CONTEXT"), "text harness context missing");
+  assert.ok(
+    augmented.content.at(-1)?.text?.includes("MUST_CONTINUE_TO_TOOL"),
+    "initial full snapshot injection must end with the imperative continuation tail"
+  );
 
   // --- Context Broker V2: snapshot dedup, change reinjection, cleared state ---
   const baseFixture = () => ({
@@ -173,20 +179,37 @@ try {
     "skip tools must still carry the continuation tail"
   );
 
-  // goal/task_state are self-signaling: no tail on top of their own signals.
+  // Real Web regression: goal(create) previously self-signaled only in-band,
+  // but ChatGPT still ended the turn immediately after Goal activation. State
+  // tools must therefore also END with the imperative continuation tail.
   const goalToolResult = await appendHarnessRuntimeContextToResult(workspace, {
     content: [{ type: "text", text: "goal status" }],
     structuredContent: { ok: true, tool: "goal", summary: "status", data: { goal: { id: "g" } } },
   }, { toolName: "goal" });
   assert.ok(
-    !JSON.stringify(goalToolResult.content).includes("Your next action must be a tool call"),
-    "self-signaling tools must not get the tail"
+    goalToolResult.content.at(-1)?.text?.includes("MUST_CONTINUE_TO_TOOL") &&
+      goalToolResult.content.at(-1)?.text?.includes("Your next action must be a tool call"),
+    "goal results must end with the imperative continuation tail while the Goal is active"
+  );
+
+  const taskStateToolResult = await appendHarnessRuntimeContextToResult(workspace, {
+    content: [{ type: "text", text: "checkpoint" }],
+    structuredContent: { ok: true, tool: "task_state", summary: "checkpoint", data: { task: { id: task.id } } },
+  }, { toolName: "task_state" });
+  assert.ok(
+    taskStateToolResult.content.at(-1)?.text?.includes("MUST_CONTINUE_TO_TOOL") &&
+      taskStateToolResult.content.at(-1)?.text?.includes("Your next action must be a tool call"),
+    "task_state results must end with the imperative continuation tail while the Goal is active"
   );
 
   await checkpointDurableTask(workspace, task.id, { current_step: "broker dedup probe" });
   const third = await appendHarnessRuntimeContextToResult(workspace, baseFixture(), { toolName: "fixture" });
   assert.ok(JSON.stringify(third.content).includes("HARNESS CONTEXT"), "state change must re-inject the snapshot");
   assert.ok(JSON.stringify(third.content).includes("supersedes"), "snapshot must carry the supersede header");
+  assert.ok(
+    third.content.at(-1)?.text?.includes("MUST_CONTINUE_TO_TOOL") && third.content.at(-1)?.text?.includes("Your next action must be a tool call"),
+    "changed-state snapshot reinjection must still END with the imperative continuation tail"
+  );
 
   // A new MCP session (new ChatGPT conversation) must get a fresh injection
   // even when process-level state is unchanged.

@@ -12,24 +12,20 @@ MCP server local giống Codex: đọc/ghi file, chạy lệnh, git. Dùng với
 - **Full machine access** — không giới hạn path, không chặn lệnh
 - Dùng absolute path bất kỳ: `C:\`, `D:\Projects\...` (Windows) · `/Users/you/projects/...` (macOS) · `/home/you/...` (Linux)
 - `WORKSPACE_PATH` chỉ là thư mục mặc định cho path tương đối và shell/git
-- `CHATGPT_AUTO_APPROVE=true` — giảm popup xác nhận trên ChatGPT
+- Quyền xác nhận nằm ở **ChatGPT Settings → Apps**, không nằm trong MCP server. Tool annotations chỉ mô tả rủi ro; chúng không thể tự cấp quyền cho MCP.
 
-## ChatGPT: tránh popup + lỗi "Luôn cho phép phải kết nối lại"
+## ChatGPT: quyền app và Goal chạy liên tục
 
-### Cách đúng (làm TRƯỚC khi chat)
+### Cấu hình cho local harness tin cậy
 
 1. **Settings → Apps → Connectors** → chọn connector **Codex Local**
-2. Đặt quyền app: **Chỉ hỏi trước thay đổi quan trọng** hoặc **Hỏi trước khi thay đổi**
+2. Nếu muốn Goal chạy tự động mà không dừng giữa chừng vì popup, đặt **riêng connector này** thành **Allow all actions / Never ask**. Không cần đổi global default cho app khác.
 3. Bấm **Refresh** connector (sau mỗi lần update server)
 4. Mở chat mới, chọn connector, rồi mới gửi prompt
 
-### KHÔNG bấm "Luôn cho phép" trên popup
+Nếu muốn giữ confirmation cho các thao tác ngoài Goal, dùng mức quyền thấp hơn. Khi đó ChatGPT vẫn có thể hỏi trước một số write/command theo app permission và ngữ cảnh hành động.
 
-Đây là bug/UI ChatGPT: bấm **Luôn cho phép** thường **đóng MCP session** → tunnel log `stream canceled` → phải kết nối lại.
-
-Thay vào đó:
-- Bấm **Cho phép một lần** khi cần, hoặc
-- Cấu hình quyền ở **Settings → Apps** (bước trên) để ít hỏi hơn
+`CHATGPT_AUTO_APPROVE` trước đây cố giảm popup bằng cách hạ risk annotations. Cách đó không thể bypass host confirmation và làm sai semantics MCP; biến này không còn điều khiển ToolAnnotations. Autonomy phải được cấu hình ở app-permission layer.
 
 ### Lỗi tunnel `stream canceled by remote`
 
@@ -199,7 +195,39 @@ Health check: `http://127.0.0.1:3000/health` | Admin UI: `http://127.0.0.1:<ADMI
 |---|---|
 | Access denied | Kiểm tra path; bật `FULL_DISK_ACCESS=true` |
 | Patch context not found | Đọc file trước; thêm context lines (dòng bắt đầu bằng space) |
-| ChatGPT hỏi quyền mỗi lần | Settings → Apps → đặt *Chỉ hỏi trước thay đổi quan trọng*; kiểm tra `CHATGPT_AUTO_APPROVE=true`. **Không** bấm "Luôn cho phép" trên popup (xem mục trên) |
+| ChatGPT hỏi quyền mỗi lần | Đây là host/app-permission policy, không phải Goal tự dừng. Với local harness tin cậy: Settings → Apps → đặt **riêng connector này** thành *Allow all actions / Never ask*. Tool annotations không được dùng để giả vờ write/delete là an toàn. |
 | Connection failed | Server + tunnel đều phải chạy; URL phải HTTPS và có `/mcp/<MCP_TOKEN>` |
 | Tool not found | Tool đó chỉ có ở profile `full` — xem mục *Tool profile*. Gọi `agent_status` để kiểm tra |
 | Connector loading mãi khi bấm Create | Build cũ bị deadlock SSE stream. Chạy `npm run build` rồi khởi động lại server |
+
+## Project Cairn Collaboration Rules
+
+This project uses Project Cairn to organize project knowledge: this `AGENTS.md` is the rules-and-navigation entry point, `cairn/` is the project knowledge/state layer, and `CLAUDE.md` is only `@AGENTS.md`.
+
+## Project one-liner
+
+把 ChatGPT Web 通过 MCP 接入本机工具，并沉淀 Web Harness 的 GoalRun 与扩展层经验。
+
+## Init configuration
+
+- Graduation provider(s): configured locally; never publish private knowledge-base settings.
+- Knowledge base index: `cairn/README.md`
+- Graduation target: `cairn`
+
+## Reading order after entering the project
+
+1. Read this file first.
+2. Read the most recent entries in `cairn/LOG.md` (newest entries are at the top).
+3. Read the relevant `cairn/` topic notes as needed for the task at hand.
+
+## Document collaboration rules
+
+- Before making a change, judge whether the user wants "discuss/suggest" or "just edit the doc directly"; when they say "take a look first / evaluate first," give analysis first — don't rewrite a formal doc outright.
+- When correcting a past judgment, append a correction note; don't silently overwrite it.
+- Don't write an unconfirmed judgment as a settled fact.
+
+## Knowledge distillation rules
+
+- After every substantive step forward, add one entry to the top of `cairn/LOG.md` (summary + pointer); let conclusions settle into the `cairn/` topic notes.
+- **Completion reply gate:** before any completion claim—including but not limited to work being complete or implemented, finalized, updated, synchronized, verified or tests passing; a problem being fixed or resolved; a deliverable being ready to use; a statement that work has ended; and semantically equivalent wording—run the Cairn checkpoint in `references/maintenance.md`; update only the records its trigger matrix requires, verify them, then reply. An explicit read-only / no-edit request forbids Cairn writes.
+- Cross-project reusable experience gets distilled into the configured knowledge base via the graduation mechanism.
