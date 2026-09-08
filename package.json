@@ -1,16 +1,16 @@
 {
-  "name": "chatgpt-local-coder",
+  "name": "chatgpt-web-harness",
   "version": "1.0.0",
-  "description": "Turn ChatGPT web into a local coding agent via MCP — files, shell, git, apply_patch, 30-tool ChatGPT web surface",
+  "description": "ChatGPT Web Harness: a self-hosted MCP sidecar and desktop harness for local coding workflows.",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hoangcoderr/chatgpt-local-coder.git"
+    "url": "https://github.com/jamesmendax/chatgpt-local-coder-enhanced.git"
   },
-  "homepage": "https://github.com/hoangcoderr/chatgpt-local-coder#readme",
+  "homepage": "https://github.com/jamesmendax/chatgpt-local-coder-enhanced#readme",
   "bugs": {
-    "url": "https://github.com/hoangcoderr/chatgpt-local-coder/issues"
+    "url": "https://github.com/jamesmendax/chatgpt-local-coder-enhanced/issues"
   },
-  "author": "hoangcoderr",
+  "author": "hoangcoderr and contributors; ChatGPT Web Harness maintained by jamesmendax",
   "type": "module",
   "main": "dist/index.js",
   "bin": {

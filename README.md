@@ -1,8 +1,8 @@
 <div align="center">
 
-> **隔离预览版 v0.1.4-isolated.1**：此分支提供独立桌面版本。[下载 Release](https://github.com/jamesmendax/chatgpt-local-coder/releases/tag/v0.1.4-isolated.1) · [使用与验证说明](ISOLATED_VERSION.md)。下文的 3000/3001 端口属于通用 server 模式；桌面隔离版默认 3300/3301/8380。
+> **隔离预览版 v0.1.4-isolated.1**：此分支提供独立桌面版本。[下载 Release](https://github.com/jamesmendax/chatgpt-local-coder-enhanced/releases/tag/v0.1.4-isolated.1) · [使用与验证说明](ISOLATED_VERSION.md)。下文的 3000/3001 端口属于通用 server 模式；桌面隔离版默认 3300/3301/8380。
 
-# ChatGPT Local Coder
+# ChatGPT Web Harness
 
 **Turn ChatGPT web into a local coding agent — a 27-tool web profile with Goal Mode, compact task state, shell evidence, git, and patches.**
 
@@ -18,13 +18,13 @@
 
 ---
 
-ChatGPT Local Coder is a **self-hosted MCP server** that gives ChatGPT (and any MCP client) full access to your machine — read and edit code, run `npm test`, manage git, apply unified diffs, and explore projects with `glob` / `grep`.
+ChatGPT Web Harness is a **self-hosted MCP sidecar and desktop harness** that gives ChatGPT (and any MCP client) access to the local capabilities you configure — read and edit code, run tests, manage git, apply unified diffs, and explore projects with `glob` / `grep`.
 
 No desktop app. No vendor lock-in. Run one Node process on your PC, expose it through a tunnel, and code from ChatGPT in the browser.
 
 ```
 ┌─────────────────┐     HTTPS      ┌──────────────────┐     localhost     ┌─────────────────────┐
-│   ChatGPT Web   │ ─────────────► │  Tunnel (opt.)   │ ────────────────► │  chatgpt-local-coder │
+│   ChatGPT Web   │ ─────────────► │  Tunnel (opt.)   │ ────────────────► │ ChatGPT Web Harness │
 │ Developer Mode  │                │ OpenAI / CF      │      :3000/mcp    │  27-tool web profile │
 └─────────────────┘                └──────────────────┘                   └──────────┬──────────┘
                                                                                     │
@@ -36,7 +36,7 @@ No desktop app. No vendor lock-in. Run one Node process on your PC, expose it th
 
 ## ✨ Why this project
 
-| | ChatGPT alone | **+ ChatGPT Local Coder** |
+| | ChatGPT alone | **+ ChatGPT Web Harness** |
 |---|---|---|
 | Edit your repo | ❌ | ✅ `apply_patch`, `write_file` |
 | Run tests / builds | ❌ | ✅ compact `run_command` results + full log artifacts |
@@ -55,8 +55,8 @@ Built for **[ChatGPT Developer Mode](https://platform.openai.com/docs/guides/dev
 **Windows**
 
 ```powershell
-git clone https://github.com/hoangcoderr/chatgpt-local-coder.git
-cd chatgpt-local-coder
+git clone https://github.com/jamesmendax/chatgpt-local-coder-enhanced.git
+cd chatgpt-local-coder-enhanced
 copy .env.example .env          # edit WORKSPACE_PATH + MCP_TOKEN
 npm install
 npm run build
@@ -66,8 +66,8 @@ npm run build
 **macOS / Linux**
 
 ```bash
-git clone https://github.com/hoangcoderr/chatgpt-local-coder.git
-cd chatgpt-local-coder
+git clone https://github.com/jamesmendax/chatgpt-local-coder-enhanced.git
+cd chatgpt-local-coder-enhanced
 cp .env.example .env
 npm install && npm run build
 
@@ -479,11 +479,11 @@ If this saves you time, **star the repo** — it helps others find it.
 
 ## 🇻🇳 Tiếng Việt
 
-**ChatGPT Local Coder** biến ChatGPT web thành agent code trên máy bạn qua MCP.
+**ChatGPT Web Harness** biến ChatGPT web thành agent code trên máy bạn qua MCP.
 
 ```powershell
-git clone https://github.com/hoangcoderr/chatgpt-local-coder.git
-cd chatgpt-local-coder
+git clone https://github.com/jamesmendax/chatgpt-local-coder-enhanced.git
+cd chatgpt-local-coder-enhanced
 copy .env.example .env
 npm install && npm run build
 .\start.ps1                    # terminal 1
@@ -493,8 +493,8 @@ npm install && npm run build
 **macOS / Linux** — các script `.ps1` chỉ chạy trên Windows:
 
 ```bash
-git clone https://github.com/hoangcoderr/chatgpt-local-coder.git
-cd chatgpt-local-coder
+git clone https://github.com/jamesmendax/chatgpt-local-coder-enhanced.git
+cd chatgpt-local-coder-enhanced
 cp .env.example .env
 npm install && npm run build
 

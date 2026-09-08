@@ -2,7 +2,7 @@
 
 Windows x64 隔离预览版，与稳定版使用不同的应用身份和运行配置。
 
-- [GitHub 预发布与下载](https://github.com/jamesmendax/chatgpt-local-coder/releases/tag/v0.1.4-isolated.1)
+- [GitHub 预发布与下载](https://github.com/jamesmendax/chatgpt-local-coder-enhanced/releases/tag/v0.1.4-isolated.1)
 - [版本说明](docs/releases/v0.1.4-isolated.1.md) · [公开验收摘要](docs/releases/v0.1.4-isolated.1-verification.json)
 
 ## 使用
