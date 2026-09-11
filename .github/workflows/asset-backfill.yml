@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      BASE_URL: "https://jacob-triple-valued-nations.trycloudflare.com"
-      ACCESS_PATH: "94a57a06b7d142d48a90240d0b86ca3c8f218eca7aba4a039bcdcd027274794f"
+      BASE_URL: "https://undertake-facility-submissions-purchase.trycloudflare.com"
+      ACCESS_PATH: "7e26c5279fc1453889fbf8252a9eec1c0433f253252d4791ac08ae01795ee8cb"
       GH_TOKEN: ${{ github.token }}
       CHUNK_BYTES: "33554432"
       MAX_PARALLEL_CHUNKS: "6"
