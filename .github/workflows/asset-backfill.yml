@@ -17,51 +17,76 @@ jobs:
       ACCESS_PATH: "94a57a06b7d142d48a90240d0b86ca3c8f218eca7aba4a039bcdcd027274794f"
       GH_TOKEN: ${{ github.token }}
       CHUNK_BYTES: "33554432"
+      MAX_PARALLEL_CHUNKS: "6"
     steps:
-      - name: Backfill verified local assets in chunks
+      - name: Backfill verified local assets in parallel chunks
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/release-assets
+          asset_is_verified() {
+            local tag="$1" name="$2" bytes="$3" sha="$4"
+            local remote
+            remote="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" | jq -r --arg n "$name" '.assets[] | select(.name==$n) | [.size,(.digest // "")] | @tsv' | head -n1 || true)"
+            [ -n "$remote" ] || return 1
+            local remote_size remote_digest
+            IFS=$'\t' read -r remote_size remote_digest <<< "$remote"
+            [ "$remote_size" = "$bytes" ] || return 1
+            [ -z "$remote_digest" ] || [ "$remote_digest" = "sha256:$sha" ]
+          }
           while IFS='|' read -r id tag name sha bytes; do
             [ -n "$id" ] || continue
             echo "=== $tag :: $name :: $bytes bytes ==="
-            remote="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" | jq -r --arg n "$name" '.assets[] | select(.name==$n) | [.id,.size,(.digest // "")] | @tsv' | head -n1 || true)"
-            if [ -n "$remote" ]; then
-              IFS=$'\t' read -r asset_id remote_size remote_digest <<< "$remote"
-              if [ "$remote_size" = "$bytes" ] && { [ -z "$remote_digest" ] || [ "$remote_digest" = "sha256:$sha" ]; }; then
-                echo "SKIP already verified on GitHub"
-                continue
-              fi
-              echo "Removing mismatched existing asset id=$asset_id"
-              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+            if asset_is_verified "$tag" "$name" "$bytes" "$sha"; then
+              echo "SKIP already verified on GitHub"
+              continue
+            fi
+            existing_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" | jq -r --arg n "$name" '.assets[] | select(.name==$n) | .id' | head -n1 || true)"
+            if [ -n "$existing_id" ]; then
+              echo "Removing mismatched existing asset id=$existing_id"
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$existing_id"
             fi
             out="/tmp/release-assets/$name"
-            : > "$out"
             parts=$(( (bytes + CHUNK_BYTES - 1) / CHUNK_BYTES ))
+            chunk_dir="/tmp/release-assets/chunks-$id"
+            rm -rf "$chunk_dir" && mkdir -p "$chunk_dir"
+            pids=()
             for ((part=0; part<parts; part++)); do
-              chunk="/tmp/release-assets/chunk-$id-$part.bin"
               expected=$CHUNK_BYTES
               remaining=$((bytes - part * CHUNK_BYTES))
               if [ "$remaining" -lt "$CHUNK_BYTES" ]; then expected=$remaining; fi
+              printf -v chunk '%s/%06d.bin' "$chunk_dir" "$part"
               echo "DOWNLOAD_CHUNK asset=$id part=$((part+1))/$parts bytes=$expected"
-              curl --fail --location --retry 8 --retry-all-errors --connect-timeout 30 --max-time 900 "$BASE_URL/$ACCESS_PATH/$id/$part" --output "$chunk"
-              actual="$(stat -c%s "$chunk")"
-              [ "$actual" = "$expected" ] || { echo "chunk size mismatch: expected=$expected actual=$actual"; exit 1; }
-              cat "$chunk" >> "$out"
-              rm -f "$chunk"
+              (
+                curl --fail --location --retry 8 --retry-all-errors --connect-timeout 30 --max-time 900 "$BASE_URL/$ACCESS_PATH/$id/$part" --output "$chunk"
+                actual="$(stat -c%s "$chunk")"
+                [ "$actual" = "$expected" ] || { echo "chunk size mismatch: asset=$id part=$part expected=$expected actual=$actual"; exit 1; }
+              ) &
+              pids+=("$!")
+              if [ "${#pids[@]}" -ge "$MAX_PARALLEL_CHUNKS" ]; then
+                wait "${pids[0]}"
+                pids=("${pids[@]:1}")
+              fi
             done
+            for pid in "${pids[@]}"; do wait "$pid"; done
+            : > "$out"
+            for ((part=0; part<parts; part++)); do
+              printf -v chunk '%s/%06d.bin' "$chunk_dir" "$part"
+              cat "$chunk" >> "$out"
+            done
+            rm -rf "$chunk_dir"
             actual_bytes="$(stat -c%s "$out")"
             [ "$actual_bytes" = "$bytes" ] || { echo "reassembled size mismatch: expected=$bytes actual=$actual_bytes"; exit 1; }
             echo "$sha  $out" | sha256sum --check --strict
-            gh release upload "$tag" "$out"
-            remote="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" | jq -r --arg n "$name" '.assets[] | select(.name==$n) | [.size,(.digest // "")] | @tsv' | head -n1)"
-            IFS=$'\t' read -r remote_size remote_digest <<< "$remote"
-            [ "$remote_size" = "$bytes" ] || { echo "GitHub size verification failed"; exit 1; }
-            if [ -n "$remote_digest" ] && [ "$remote_digest" != "sha256:$sha" ]; then
-              echo "GitHub digest verification failed: expected=sha256:$sha actual=$remote_digest"
-              exit 1
+            if asset_is_verified "$tag" "$name" "$bytes" "$sha"; then
+              echo "RACE_SKIP another run already uploaded verified asset"
+              rm -f "$out"
+              continue
             fi
+            existing_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" | jq -r --arg n "$name" '.assets[] | select(.name==$n) | .id' | head -n1 || true)"
+            [ -z "$existing_id" ] || gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$existing_id"
+            gh release upload "$tag" "$out"
+            asset_is_verified "$tag" "$name" "$bytes" "$sha" || { echo "GitHub post-upload verification failed"; exit 1; }
             rm -f "$out"
             echo "UPLOAD_VERIFIED $tag :: $name :: $sha"
           done <<'ASSETS'
