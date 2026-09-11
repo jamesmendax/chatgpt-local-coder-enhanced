@@ -6,19 +6,26 @@ import fs from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 import { spawn } from "node:child_process";
+import assert from "node:assert/strict";
+import net from "node:net";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 const scratch = process.env.GOAL_SCRATCH || path.join(root, ".tool-test-tmp", "bridge-integration");
 
-const mcpPort = 4100 + Math.floor(Math.random() * 200);
-const adminPort = mcpPort + 1;
-const mockPort = mcpPort + 2;
-const tmpDir = path.join(scratch, `run-${mcpPort}`);
+await fs.mkdir(scratch, { recursive: true });
+const tmpDir = await fs.mkdtemp(path.join(scratch, "run-"));
+const reservations = await Promise.all(Array.from({ length: 3 }, () => new Promise((resolve, reject) => {
+  const server = net.createServer();
+  server.once("error", reject);
+  server.listen(0, "127.0.0.1", () => resolve(server));
+})));
+const [mcpPort, adminPort, mockPort] = reservations.map((server) => server.address().port);
+await Promise.all(reservations.map((server) => new Promise((resolve) => server.close(resolve))));
 
 function spawnNode(script, env = {}) {
   return spawn(process.execPath, [script], {
-    cwd: root,
+    cwd: tmpDir,
     env: { ...process.env, ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -67,11 +74,14 @@ async function callTool(base, sessionId, name, args = {}) {
     { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } },
     sessionId
   );
-  if (status !== 200) throw new Error(`tools/call ${name} HTTP ${status}: ${JSON.stringify(json)}`);
+  if (status !== 200 || json?.error || json?.result?.isError) {
+    throw new Error(`tools/call ${name} HTTP ${status}: ${JSON.stringify(json)}`);
+  }
   return json;
 }
 
 await fs.mkdir(tmpDir, { recursive: true });
+await fs.writeFile(path.join(tmpDir, "empty.env"), "# Isolated integration fixture\n");
 
 const configPath = path.join(tmpDir, "mcp-upstream.json");
 await fs.writeFile(
@@ -103,7 +113,18 @@ const hub = spawnNode(path.join(root, "dist/index.js"), {
   PORT: String(mcpPort),
   ADMIN_PORT: String(adminPort),
   MCP_UPSTREAM_CONFIG: configPath,
-  WORKSPACE_PATH: root,
+  WORKSPACE_PATH: tmpDir,
+  // This fixture deliberately tests the full-profile meta tools, not the slim catalog.
+  CHATGPT_TOOL_PROFILE: "full",
+  HOST: "127.0.0.1",
+  MCP_TOKEN: "",
+  ADMIN_TOKEN: "",
+  CLC_RUNTIME_DIR: tmpDir,
+  CODEX_HOME: path.join(tmpDir, ".codex"),
+  MCP_SHELL_STATE_DIR: path.join(tmpDir, ".mcp-state"),
+  AUDIT_LOG_PATH: path.join(tmpDir, "audit.log"),
+  CHECKPOINT_PATH: path.join(tmpDir, "checkpoints"),
+  DOTENV_CONFIG_PATH: path.join(tmpDir, "empty.env"),
 });
 
 let hubLog = "";
@@ -216,8 +237,12 @@ try {
   log(`tools/list after allowlist: mockhttp__add present`);
 
   const proxied = await callTool(`http://127.0.0.1:${mcpPort}`, sessionId, "mockhttp__add", { a: 1, b: 2 });
-  const proxiedPayload = JSON.parse(proxied.result.content[0].text);
-  if (!proxiedPayload.ok) throw new Error(JSON.stringify(proxiedPayload));
+  // Direct proxies preserve the upstream CallToolResult; they must not add a hub envelope.
+  const proxiedPayload = proxied.result;
+  assert.deepEqual(proxiedPayload.structuredContent, { sum: 3 });
+  assert.equal(proxiedPayload.content[0].type, "text");
+  assert.equal(proxiedPayload.content[0].text, "3");
+  assert.notEqual(proxiedPayload.isError, true);
 
   const adminHtml = await (await fetch(`http://127.0.0.1:${adminPort}/ui/`)).text();
   if (!adminHtml.includes("Import") || !adminHtml.includes("Claude Code") || !adminHtml.includes("OpenCode")) {
@@ -259,8 +284,12 @@ try {
   await fs.writeFile(path.join(scratch, "integration-error.log"), String(err?.stack || err));
   console.error("FAIL bridge integration:", err.message || err);
   console.error(hubLog.slice(-2000));
-  process.exit(1);
+  process.exitCode = 1;
 } finally {
-  hub.kill("SIGTERM");
-  mockHttp.kill("SIGTERM");
+  await Promise.all([hub, mockHttp].map((child) => new Promise((resolve, reject) => {
+    if (child.exitCode !== null || child.signalCode !== null) return resolve();
+    const timer = setTimeout(() => reject(new Error(`Owned fixture process ${child.pid} did not exit`)), 10000);
+    child.once("exit", () => { clearTimeout(timer); resolve(); });
+    child.kill("SIGTERM");
+  })));
 }

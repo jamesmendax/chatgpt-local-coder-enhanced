@@ -12,6 +12,7 @@ const harness = require("./harness");
 const paths = require("./paths");
 const configStore = require("./config");
 const { profile } = require("./app-profile");
+const accountContext = require("./account-context");
 const { psQuote, runPowershell } = require("./shell-util");
 
 const MCP_PATTERN = /dist[\\/]index\.js/i;
@@ -19,6 +20,13 @@ const TUNNEL_PATTERN = /tunnel-client(\.exe)?/i;
 const TUNNEL_VERSION = "v0.0.10";
 const TUNNEL_ZIP = `tunnel-client-${TUNNEL_VERSION}-windows-amd64.zip`;
 const TUNNEL_URL = `https://github.com/openai/tunnel-client/releases/download/${TUNNEL_VERSION}/${TUNNEL_ZIP}`;
+
+// Every account managed by AccountManager owns its process pair. Reusing or
+// terminating a process discovered only by port/command-line heuristics would
+// blur that ownership boundary, even for the legacy/default profile.
+function ownershipIsolated() {
+  return profile.isolated || Boolean(accountContext.current());
+}
 
 class Services extends EventEmitter {
   constructor() {
@@ -43,6 +51,7 @@ class Services extends EventEmitter {
     this.statusInFlight = null;
     this.refreshInFlight = null;
     this.busy = false;
+    this.shuttingDown = false;
   }
 
   note(text) {
@@ -104,7 +113,7 @@ class Services extends EventEmitter {
           : (health && health.runtime ? health.runtime.pid : (mcpOwner && mcpOwner.pid) || null),
         healthy: Boolean(health),
         external: !mcpManaged && Boolean(health),
-        externalRecognized: Boolean(!profile.isolated && !mcpManaged && mcpOwner && mcpOwner.recognized),
+        externalRecognized: Boolean(!ownershipIsolated() && !mcpManaged && mcpOwner && mcpOwner.recognized),
         ownerProbeError: !mcpManaged && mcpOwner ? mcpOwner.error : null,
         portOccupiedByUnknown: Boolean(!mcpManaged && !health && mcpOwner && mcpOwner.pid),
         build: health && health.runtime ? health.runtime.build_id : null,
@@ -129,7 +138,7 @@ class Services extends EventEmitter {
         authError: tunnelProbe.authError,
         metaError: tunnelProbe.metaError,
         external: !tunnelManaged && tunnelProbe.ready,
-        externalRecognized: Boolean(!profile.isolated && !tunnelManaged && tunnelOwner && tunnelOwner.recognized),
+        externalRecognized: Boolean(!ownershipIsolated() && !tunnelManaged && tunnelOwner && tunnelOwner.recognized),
         ownerProbeError: !tunnelManaged && tunnelOwner ? tunnelOwner.error : null,
         portOccupiedByUnknown: Boolean(!tunnelManaged && !tunnelProbe.ready && tunnelOwner && tunnelOwner.pid),
         lastExit: this.tunnel.lastExit,
@@ -174,6 +183,7 @@ class Services extends EventEmitter {
   async waitFor(check, timeoutMs, label) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      if (this.shuttingDown) return false;
       if (await check()) return true;
       await sleep(500);
     }
@@ -187,7 +197,7 @@ class Services extends EventEmitter {
     if (this.mcp.isAlive()) { this.note("MCP 已由启动器管理，跳过。"); return; }
     const health = await status.probeMcp(cfg.mcpPort);
     if (health) {
-      if (profile.isolated) throw new Error("隔离版不复用外部 MCP，请更换本地端口；未接管或终止任何进程。");
+      if (ownershipIsolated()) throw new Error("隔离版不复用外部 MCP；多账号模式同样要求当前账号使用独立端口，且不会接管或终止任何外部进程。");
       this.note(`端口 ${cfg.mcpPort} 已有健康的 MCP（PID ${health.runtime && health.runtime.pid}），沿用该外部进程。`);
       return;
     }
@@ -199,6 +209,7 @@ class Services extends EventEmitter {
     if (!fs.existsSync(paths.distEntry())) throw new Error(`找不到 MCP 构建产物: ${paths.distEntry()}`);
     paths.ensureRuntimeDir();
     harness.ensureDotEnv();
+    if (this.shuttingDown) throw new Error("程序正在退出，已取消 MCP 启动。");
     const spec = harness.mcpSpawnSpec(cfg);
     const pid = this.mcp.start(spec);
     this.note(`MCP 已启动，PID ${pid}，等待 /health ...`);
@@ -221,7 +232,7 @@ class Services extends EventEmitter {
     const probe = await status.probeTunnel(cfg.tunnelPort, { expectedTunnelId: cfg.tunnelId });
     if (probe.metaError?.code === "tunnel_mismatch") throw new Error("本地端口上的 Tunnel ID 与配置不符；未终止外部进程，请检查端口或配置。");
     if (probe.ready) {
-      if (profile.isolated) throw new Error("隔离版不复用外部 Tunnel，请更换本地端口；未接管或终止任何进程。");
+      if (ownershipIsolated()) throw new Error("隔离版不复用外部 Tunnel；多账号模式同样要求当前账号使用独立端口，且不会接管或终止任何外部进程。");
       this.note(`端口 ${cfg.tunnelPort} 已有就绪的隧道，沿用该外部进程。`);
       return;
     }
@@ -236,6 +247,7 @@ class Services extends EventEmitter {
     this.tunnelDiagnostics = [];
     const spec = await harness.tunnelSpawnSpec(cfg, apiKey, "run");
     this.note(`Tunnel 出站策略：${spec.proxyInfo.mode === "proxy" ? spec.proxyInfo.url : "直连"}（${spec.proxyInfo.source}）；本地 MCP 直连。`);
+    if (this.shuttingDown) throw new Error("程序正在退出，已取消隧道启动。");
     const pid = this.tunnel.start(spec);
     this.note(`Tunnel 已启动，PID ${pid}，等待 /readyz ...`);
     const ok = await this.waitFor(async () => (await status.probeTunnel(cfg.tunnelPort)).ready, 60000, "Tunnel /readyz");
@@ -301,7 +313,7 @@ class Services extends EventEmitter {
   /** 明确的用户操作：终止已识别的外部 MCP / Tunnel 进程（只终止命令行匹配的进程）。 */
   async stopExternal() {
     // Isolation is an ownership boundary, not a heuristic command-name match.
-    if (profile.isolated) throw new Error("隔离版不接管或终止外部进程，只管理由本实例启动的服务。");
+    if (ownershipIsolated()) throw new Error("隔离版不接管或终止外部进程；多账号模式也只管理当前账号由本程序启动的服务。");
     return this.withBusy(async () => {
       const cfg = this.config();
       const targets = [
@@ -347,6 +359,7 @@ class Services extends EventEmitter {
   }
 
   async shutdown() {
+    this.shuttingDown = true;
     if (this.tunnel.isAlive()) await this.tunnel.stop(5000);
     if (this.mcp.isAlive()) await this.mcp.stop(5000);
   }

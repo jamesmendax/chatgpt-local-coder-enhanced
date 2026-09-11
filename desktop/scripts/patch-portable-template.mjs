@@ -22,7 +22,7 @@ const newBlock = [
   "  ; Long dependency paths otherwise exceed MAX_PATH under a nested %TEMP%.",
   "  Push $R0",
   "  Push $R1",
-  "  System::Call 'Kernel32::GetCurrentProcessId() i .R0'",
+  "  System::Call 'Kernel32::GetCurrentProcessId() i.R0'",
   "  StrCpy $R1 \"$TEMP\\cgh-$R0\"",
   "  StrCpy $INSTDIR $R1",
   "  Pop $R1",

@@ -312,6 +312,7 @@ async function main(createMcpServer, McpUpstreamManager, refreshProxiedTools, st
       total_lines: 2,
       truncated: false,
       next_offset: null,
+      next_character_offset: null,
       single_line_truncated: false,
     };
     const stablePayload = {
@@ -329,8 +330,8 @@ async function main(createMcpServer, McpUpstreamManager, refreshProxiedTools, st
       name: "visual_review",
       arguments: { action: "status" },
     });
-    assert.equal(businessError.isError, undefined);
-    assert.deepEqual(Object.keys(businessError).sort(), ["content", "structuredContent"]);
+    assert.equal(businessError.isError, true, "business failures must carry the MCP error signal");
+    assert.deepEqual(Object.keys(businessError).sort(), ["content", "isError", "structuredContent"]);
     assert.equal(businessError.content.length, 1);
     assert.equal(businessError.content[0].type, "text");
     const businessPayload = JSON.parse(businessError.content[0].text);
@@ -428,7 +429,7 @@ async function main(createMcpServer, McpUpstreamManager, refreshProxiedTools, st
       arguments: {
         action: "create",
         objective: "F0 Goal tail characterization",
-        success_criteria: [{ name: "F0 criterion", passed: false }],
+        success_criteria: [{ name: "F0 criterion", passed: false, verification: { kind: "file_exists", target: goalFile } }],
       },
     });
     const createdPayload = resultPayload(createdGoal);
@@ -465,10 +466,10 @@ async function main(createMcpServer, McpUpstreamManager, refreshProxiedTools, st
     assert.match(JSON.stringify(bypass.structuredContent), /UNVERIFIED_CRITERION_UPDATE/);
 
     const evidenceResult = await goalServer.client.callTool({
-      name: "run_command",
+      name: "file_info",
       arguments: {
-        command: "node -e \"process.exit(0)\"",
-        working_directory: goalWorkspace,
+        path: goalFile,
+        sha256: true,
       },
     });
     const evidencePayload = resultPayload(evidenceResult);
@@ -491,6 +492,7 @@ async function main(createMcpServer, McpUpstreamManager, refreshProxiedTools, st
       name: "goal",
       arguments: { action: "complete" },
     });
+    assert.equal(resultPayload(completedGoal).ok, true, JSON.stringify(resultPayload(completedGoal)));
     assert.equal(resultPayload(completedGoal).data.goal.status, "completed");
     assertNoActiveGoalTail(completedGoal, "goal completion result");
 

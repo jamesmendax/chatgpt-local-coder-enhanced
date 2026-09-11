@@ -10,6 +10,13 @@ import { compactOutput, observeCommand } from "../lib/command-observation.js";
 import { childProcessEnv } from "../lib/child-env.js";
 import { toSpillRef } from "../lib/spill.js";
 import {
+  captureVerificationLaunchSnapshots,
+  captureVerificationSnapshots,
+  type GoalVerification,
+  verificationDigest,
+} from "../lib/goal-verification.js";
+import { getGoal } from "../lib/goals.js";
+import {
   bootstrapShellSession,
   createCommandLogFile,
   execInShellSession,
@@ -33,6 +40,10 @@ interface ManagedProcess {
   stderrChars: number;
   fullOutputPath?: string;
   logStream?: import("fs").WriteStream;
+  verificationCriteria: readonly { verification?: GoalVerification }[];
+  verificationLaunchSnapshots: Readonly<Record<string, string | number | boolean | null>>;
+  verificationCompletionSnapshots: Record<string, string | number | boolean | null>;
+  verificationCompletion: Promise<void>;
 }
 
 const processes = new Map<string, ManagedProcess>();
@@ -108,6 +119,55 @@ function appendLog(lines: string[], data: Buffer): void {
   }
 }
 
+async function activeVerificationCriteria(workspaceRoot: string): Promise<readonly { verification?: GoalVerification }[]> {
+  try {
+    const goal = await getGoal(workspaceRoot);
+    return goal?.status === "active" ? goal.success_criteria.map((criterion) => ({ verification: criterion.verification })) : [];
+  } catch {
+    return [];
+  }
+}
+
+function commandVerificationMetadata(
+  tool: string,
+  command: string,
+  cwd: string,
+  exitCode: number | null,
+  running: boolean,
+  ok: boolean,
+): Record<string, string | number | boolean | null> {
+  return {
+    tool,
+    commandHash: verificationDigest(command.trim()),
+    cwd,
+    exitCode,
+    running,
+    ok,
+  };
+}
+
+async function completeManagedProcessVerification(item: ManagedProcess): Promise<void> {
+  if (!item.verificationCriteria.length || item.exitCode !== 0 || item.signal !== null) return;
+  const metadata = commandVerificationMetadata(
+    "start_process",
+    item.command,
+    item.cwd,
+    item.exitCode,
+    false,
+    true,
+  );
+  const snapshots = await captureVerificationSnapshots(
+    item.verificationCriteria,
+    metadata,
+    item.verificationLaunchSnapshots,
+  );
+  Object.assign(item.verificationCompletionSnapshots, snapshots);
+}
+
+async function waitForCompletedProcessVerification(item: ManagedProcess): Promise<void> {
+  if (item.exitCode !== null || item.signal !== null) await item.verificationCompletion;
+}
+
 export function getManagedProcessRuntimeStatus() {
   pruneFinishedProcesses();
   const values = [...processes.values()];
@@ -143,6 +203,12 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
       pruneFinishedProcesses();
       requireCommandAllowed(command);
       const cwdOverride = working_directory ? await validatePath(working_directory) : undefined;
+      const cwd = cwdOverride ?? (getShellStatus().cwd || defaultCwd);
+      const verificationCriteria = await activeVerificationCriteria(defaultCwd);
+      const verificationLaunchSnapshots = await captureVerificationLaunchSnapshots(
+        verificationCriteria,
+        commandVerificationMetadata("run_command", command, cwd, null, true, false),
+      );
       const result = await execInShellSession(command, defaultCwd, timeoutSec * 1000, cwdOverride);
       await audit({
         tool: "run_command",
@@ -151,9 +217,14 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
         status: result.exit_code === 0 ? "ok" : "error",
         details: { command, exit_code: result.exit_code },
       });
+      const verificationCompletionSnapshots = await captureVerificationSnapshots(
+        verificationCriteria,
+        commandVerificationMetadata("run_command", result.command, result.cwd, result.exit_code, false, result.exit_code === 0),
+        verificationLaunchSnapshots,
+      );
       const compact = compactShellResult(result, output_mode, output_chars);
       const spill = await toSpillRef(compact.full_output_path);
-      return toolResult("run_command", { ...compact, ...(spill ? { spill } : {}) }, {
+      return toolResult("run_command", { ...compact, ...verificationCompletionSnapshots, ...(spill ? { spill } : {}) }, {
         ok: result.exit_code === 0,
         summary: `${compact.command_kind} ${compact.outcome}: exit ${result.exit_code} in ${result.cwd}`,
       });
@@ -203,6 +274,11 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
     async ({ command, working_directory }) => {
       requireCommandAllowed(command);
       const cwd = working_directory ? await validatePath(working_directory) : getShellStatus().cwd || defaultCwd;
+      const verificationCriteria = await activeVerificationCriteria(defaultCwd);
+      const verificationLaunchSnapshots = await captureVerificationLaunchSnapshots(
+        verificationCriteria,
+        commandVerificationMetadata("start_process", command, cwd, null, true, false),
+      );
       let shell = "bash";
       let effectiveCommand = command;
       let args = ["-lc", effectiveCommand];
@@ -244,6 +320,10 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
         stderrChars: 0,
         fullOutputPath: log.path,
         logStream: log.stream,
+        verificationCriteria,
+        verificationLaunchSnapshots,
+        verificationCompletionSnapshots: {},
+        verificationCompletion: Promise.resolve(),
       };
       processes.set(id, item);
       child.stdout.on("data", (d: Buffer) => {
@@ -259,6 +339,7 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
       child.on("close", (code, signal) => {
         item.exitCode = code;
         item.signal = signal;
+        item.verificationCompletion = completeManagedProcessVerification(item).catch(() => undefined);
         item.logStream?.end(`\n# exit: ${code}\n# signal: ${signal ?? "none"}\n`);
       });
       await audit({ tool: "start_process", action: "start", target: cwd, status: "ok", details: { id, command } });
@@ -280,6 +361,9 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
     },
     async ({ id }) => {
       pruneFinishedProcesses();
+      await Promise.all([...processes.values()]
+        .filter((item) => !id || item.id === id)
+        .map((item) => waitForCompletedProcessVerification(item)));
       const processes_list = [...processes.values()]
         .filter((p) => !id || p.id === id)
         .map((p) => ({
@@ -294,6 +378,7 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
           stdout_chars: p.stdoutChars,
           stderr_chars: p.stderrChars,
           full_output_path: p.fullOutputPath,
+          ...p.verificationCompletionSnapshots,
         }));
       return toolResult("process_status", { processes: processes_list }, { summary: `${processes_list.length} process(es)` });
     }
@@ -316,6 +401,7 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
       pruneFinishedProcesses();
       const item = processes.get(id);
       if (!item) throw new Error(`Unknown process id: ${id}`);
+      await waitForCompletedProcessVerification(item);
       const rawStdout = item.stdout.join("");
       const rawStderr = item.stderr.join("");
       const observation = observeCommand({
@@ -336,6 +422,8 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
           : compactOutput(rawStderr, Math.max(1000, Math.floor(tail_chars * 0.45))).text;
       const data = {
         id,
+        command: item.command,
+        cwd: item.cwd,
         running: item.exitCode === null && item.signal === null,
         exit_code: item.exitCode,
         signal: item.signal,
@@ -344,6 +432,7 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
         stdout_chars: item.stdoutChars,
         stderr_chars: item.stderrChars,
         full_output_path: item.fullOutputPath,
+        ...item.verificationCompletionSnapshots,
         ...observation,
       };
       const spill = await toSpillRef(item.fullOutputPath);

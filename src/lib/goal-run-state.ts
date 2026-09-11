@@ -239,7 +239,7 @@ export type GoalRunEvent =
       };
     }
   | {
-      readonly type: "confirm_criterion";
+      readonly type: "confirm_criterion" | "reconfirm_criterion";
       readonly criterionId: string;
       readonly evidenceIds: readonly string[];
     }
@@ -1148,8 +1148,9 @@ export function advanceGoalRun(
       break;
     }
 
-    case "confirm_criterion": {
-      assertState(base, event.type, ["RUNNING"]);
+    case "confirm_criterion":
+    case "reconfirm_criterion": {
+      assertState(base, event.type, event.type === "reconfirm_criterion" ? ["RUNNING", "READY_TO_FINALIZE"] : ["RUNNING"]);
       const criterionId = text(event.criterionId, "event.criterionId", 128);
       const index = base.criteria.findIndex((criterion) => criterion.id === criterionId);
       if (index < 0) fail("INVALID_INPUT", `unknown criterion ${criterionId}`);
@@ -1175,7 +1176,7 @@ export function advanceGoalRun(
         if (JSON.stringify(currentIds) === JSON.stringify(requestedIds)) {
           return noopResult(base, event, `Criterion ${criterionId} already confirmed with the same evidence`);
         }
-        fail("ILLEGAL_TRANSITION", `criterion ${criterionId} is already confirmed`);
+        if (event.type !== "reconfirm_criterion") fail("ILLEGAL_TRANSITION", `criterion ${criterionId} is already confirmed`);
       }
       const criteria = next.criteria.map((criterion, criterionIndex) =>
         criterionIndex === index

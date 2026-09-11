@@ -55,6 +55,8 @@ copy("bin/tunnel-client.exe", { optional: true });
 // package explicitly after first run.
 copy("public", { optional: true });
 copy(".env.example");
+copy("LICENSE");
+copy("third-party");
 copy("icon.png", { optional: true });
 copy("profiles", {
   filter: (src) => {
@@ -81,7 +83,8 @@ fs.writeFileSync(path.join(stagedProfiles, "plugins.json"), JSON.stringify({
 fs.writeFileSync(path.join(stagedProfiles, "mcp-upstream.json"), JSON.stringify({ version: 1, servers: [] }, null, 2) + "\n");
 assertStagingSafe(staging);
 
-// 只保留生产依赖的 package.json。
+// Keep the declared graph aligned with the audited lock. npm ci --omit=dev
+// installs only production packages, without floating to newer versions.
 const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
 const slim = {
   name: pkg.name,
@@ -90,11 +93,21 @@ const slim = {
   type: pkg.type,
   main: pkg.main,
   dependencies: pkg.dependencies,
+  devDependencies: pkg.devDependencies,
 };
 fs.writeFileSync(path.join(staging, "package.json"), JSON.stringify(slim, null, 2));
 
-log("安装生产依赖（npm install --omit=dev --ignore-scripts）...");
-run("npm", ["install", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", "--no-package-lock"], staging);
+const lockPath = path.join(repoRoot, "package-lock.json");
+const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+if (lock.lockfileVersion !== 3 || !lock.packages?.[""]) throw new Error("A valid npm v3 lockfile is required for release staging");
+for (const [key, entry] of Object.entries(lock.packages)) {
+  if (key && (!key.startsWith("node_modules/") || entry.link || !entry.integrity || !String(entry.resolved || "").startsWith("https://"))) {
+    throw new Error(`Non-registry or unlocked dependency in release lock: ${key}`);
+  }
+}
+fs.copyFileSync(lockPath, path.join(staging, "package-lock.json"));
+log("安装锁定的生产依赖（npm ci --omit=dev --ignore-scripts）...");
+run("npm", ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], staging);
 
 // The production dependency tree includes documentation-only examples,
 // declaration files, source maps, and Playwright's bundled Skill reference

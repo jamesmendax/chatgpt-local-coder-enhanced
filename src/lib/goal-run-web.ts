@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assertGoalCriterionVerified, normalizeGoalVerification, verificationDigest } from "./goal-verification.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import {
@@ -263,6 +264,24 @@ export function classifyGoalRunToolEvidence(
   if (running !== undefined) metadata.running = running;
   if (status) metadata.status = compactText(status, "unknown", 80);
   if (processRef) metadata.processRef = compactText(processRef, "unknown", 512);
+  const observed = Array.isArray(data.processes) && data.processes.length === 1 && isRecord(data.processes[0]) ? data.processes[0] : data;
+  const command = stringField(observed, "command");
+  const cwd = stringField(observed, "cwd");
+  const target = stringField(data, "path", "target");
+  const reviewId = stringField(data, "review_id");
+  const sha256 = stringField(data, "sha256");
+  const verificationSourceStable = booleanField(observed, "verification_source_stable");
+  if (command) metadata.commandHash = verificationDigest(command.trim());
+  if (cwd) metadata.cwd = cwd;
+  if (target) metadata.target = target;
+  if (reviewId) metadata.reviewId = reviewId;
+  if (sha256) metadata.sha256 = sha256;
+  if (verificationSourceStable !== undefined) metadata.verificationSourceStable = verificationSourceStable;
+  for (const source of [data, observed]) {
+    for (const [key, value] of Object.entries(source)) {
+      if (key.startsWith("verification_") && typeof value === "string") metadata[key] = value;
+    }
+  }
   return Object.freeze({
     id: `tool-${context.scope.invocationId}`.slice(0, 128),
     kind,
@@ -325,6 +344,8 @@ function mergeLegacyCriteria(
     const next: GoalCriterion = {
       name,
       passed: previous?.passed ?? false,
+      ...(raw.verification !== undefined || previous?.verification
+        ? { verification: normalizeGoalVerification(raw.verification ?? previous?.verification) } : {}),
       ...(raw.requires_confirmation === true || previous?.requires_confirmation
         ? { requires_confirmation: true }
         : {}),
@@ -389,6 +410,7 @@ function projectionSemanticKey(goal: DurableGoal): string {
       passed: criterion.passed,
       ...(criterion.detail ? { detail: criterion.detail } : {}),
       ...(criterion.requires_confirmation ? { requires_confirmation: true } : {}),
+      ...(criterion.verification ? { verification: criterion.verification } : {}),
     })),
     constraints: goal.constraints,
     status: goal.status,
@@ -627,11 +649,12 @@ export async function confirmGoalRunCriterion(
       `criterion "${legacyCriterion.name}" requires evidence_ids from successful tool results; goal(action=update, passed=true) is not accepted`
     );
   }
+  await assertGoalCriterionVerified(workspaceRoot, legacyCriterion, envelope.run.typedEvidence.filter((item) => evidenceIds.includes(item.id)));
   return commitRunProjection(
     workspaceRoot,
     envelope,
     current,
-    { type: "confirm_criterion", criterionId: runCriterion.id, evidenceIds },
+    { type: runCriterion.confirmed ? "reconfirm_criterion" : "confirm_criterion", criterionId: runCriterion.id, evidenceIds },
     "goal-run:confirm"
   );
 }
@@ -648,6 +671,10 @@ export async function transitionGoalRunLifecycle(
   }
   let envelope = await ensureGoalRunAuthority(workspaceRoot, current);
   if (action === "complete") {
+    for (const criterion of current.success_criteria) {
+      const bound = envelope.run.criteria.find((candidate) => criterionKey(candidate.description) === criterionKey(criterion.name));
+      if (bound?.confirmed) await assertGoalCriterionVerified(workspaceRoot, criterion, envelope.run.typedEvidence.filter((item) => bound.evidenceIds.includes(item.id)));
+    }
     // A crash or projection failure can leave the authoritative run at
     // READY_TO_FINALIZE after request_finalize has committed. Retrying
     // complete must resume from that durable state instead of trying the
@@ -850,6 +877,8 @@ function appendEvidenceProjection(
     id: classification.id,
     kind: classification.kind,
     verifies_criterion: classification.verifiesCriterion,
+    criterion_confirmed: false,
+    requires_verification_contract: true,
     summary: classification.summary,
   };
   const structured = isRecord(result.structuredContent) ? result.structuredContent : null;
@@ -859,7 +888,7 @@ function appendEvidenceProjection(
     : result;
   const reminder = classification.kind === "launch_ack"
     ? `GOAL EVIDENCE ${classification.id}: launch_ack only; this proves a process was started, not that it completed or passed.`
-    : `GOAL EVIDENCE ${classification.id}: ${classification.kind}; verifies_criterion=${classification.verifiesCriterion}. ${classification.summary}`;
+    : `GOAL EVIDENCE ${classification.id}: ${classification.kind}; verification_candidate=${classification.verifiesCriterion}. Not a confirmed criterion: goal(confirm) must match its declared check and current sources. ${classification.summary}`;
   return {
     ...withStructured,
     content: [...withStructured.content, { type: "text", text: reminder.slice(0, 800) }],

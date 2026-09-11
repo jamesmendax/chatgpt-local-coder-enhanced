@@ -598,5 +598,5 @@ try {
 } finally {
   await client.close().catch(() => undefined);
   await server.close().catch(() => undefined);
-  await fs.rm(tmpRoot, { recursive: true, force: true });
+  if (process.env.KEEP_VISUAL_TEST_ARTIFACTS !== "1") await fs.rm(tmpRoot, { recursive: true, force: true });
 }

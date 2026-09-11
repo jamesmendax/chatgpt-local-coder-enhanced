@@ -297,7 +297,7 @@ try {
     completedContext,
     result("run_command", { command: "npm test", exit_code: 0 }, true, "tests passed")
   );
-  assert.match(completedResult.content.at(-1).text, /verifies_criterion=true/);
+  assert.match(completedResult.content.at(-1).text, /verification_candidate=true/);
 
   const runAfterComplete = await readGoalRun(workspace);
   assert.equal(runAfterComplete.run.typedEvidence.length, 2);
@@ -333,14 +333,18 @@ try {
 
   // A durable READY_TO_FINALIZE run must be completable after a retry. This
   // is the recovery path after a crash between request_finalize and complete.
+  const recoveryFile = path.join(readyWorkspace, "recovery-evidence.txt");
+  await fs.mkdir(readyWorkspace, { recursive: true });
+  await fs.writeFile(recoveryFile, "verified recovery fixture");
+  const { verificationFileHash } = await import("../dist/lib/goal-verification.js");
   await createGoal(readyWorkspace, {
     objective: "Complete a recovered GoalRun",
-    success_criteria: [{ name: "verification command passed", passed: false }],
+    success_criteria: [{ name: "verification command passed", passed: false, verification: { kind: "file_exists", target: recoveryFile } }],
   });
   await appendGoalRunEvidenceToResult(
     readyWorkspace,
-    context("run_command", "ready-evidence"),
-    result("run_command", { command: "test", exit_code: 0 }, true, "verification passed"),
+    context("file_info", "ready-evidence"),
+    result("file_info", { path: recoveryFile, sha256: await verificationFileHash(recoveryFile) }, true, "recovery fixture exists"),
   );
   await confirmGoalRunCriterion(readyWorkspace, { criterion: "verification command passed", evidenceIds: ["tool-ready-evidence"] });
   const beforeFinalize = await readGoalRun(readyWorkspace);

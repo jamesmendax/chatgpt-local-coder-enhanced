@@ -7,6 +7,7 @@ const fs = require("fs");
 const path = require("path");
 const { configPath } = require("./paths");
 const { profile } = require("./app-profile");
+const accountContext = require("./account-context");
 
 const DEFAULTS = Object.freeze({
   version: 1,
@@ -28,9 +29,13 @@ function load() {
   try {
     const raw = fs.readFileSync(configPath(), "utf8");
     const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Invalid configuration object");
     return { ...DEFAULTS, ...parsed };
-  } catch {
-    return { ...DEFAULTS };
+  } catch (error) {
+    if (error.code === "ENOENT") return { ...DEFAULTS };
+    const failure = new Error(`无法读取启动器配置（${error.code || "INVALID_JSON"}）。原配置未被重置；请检查文件权限或恢复有效配置。`);
+    failure.code = "CONFIG_READ_FAILED";
+    throw failure;
   }
 }
 
@@ -113,12 +118,12 @@ function decryptAdminToken(config) {
  * receives a per-user random token encrypted by Electron safeStorage.
  */
 function getAdminToken(config) {
-  const override = profile.isolated ? "" : String(process.env.ADMIN_TOKEN || "").trim();
+  const override = profile.isolated || accountContext.current()?.id !== undefined ? "" : String(process.env.ADMIN_TOKEN || "").trim();
   return override || decryptAdminToken(config || {});
 }
 
 function ensureAdminToken(config) {
-  const override = profile.isolated ? "" : String(process.env.ADMIN_TOKEN || "").trim();
+  const override = profile.isolated || accountContext.current()?.id !== undefined ? "" : String(process.env.ADMIN_TOKEN || "").trim();
   if (override) return override;
   const existing = decryptAdminToken(config || {});
   if (existing) return existing;

@@ -33,6 +33,7 @@ export function toolResult<T extends object>(
 ): {
   content: Array<{ type: "text"; text: string }>;
   structuredContent: Record<string, unknown>;
+  isError?: boolean;
 } {
   const payload: ToolResultPayload = {
     ok: options?.ok ?? true,
@@ -44,6 +45,7 @@ export function toolResult<T extends object>(
   return {
     content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     structuredContent: payload,
+    ...(payload.ok ? {} : { isError: true }),
   };
 }
 

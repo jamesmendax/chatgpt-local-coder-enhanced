@@ -1,0 +1,3 @@
+@echo off
+set "WATCHDOG_SCRIPT=%~dp0scripts\goal-watchdog.mjs"
+powershell -NoProfile -Command "$needle=[regex]::Escape($env:WATCHDOG_SCRIPT); $p=Get-CimInstance Win32_Process ^| Where-Object { $_.CommandLine -match $needle }; if(-not $p){Write-Host 'Goal Watchdog is not running.'; exit 0}; foreach($x in $p){Stop-Process -Id $x.ProcessId -Force -ErrorAction SilentlyContinue; Write-Host ('Stopped Goal Watchdog PID '+$x.ProcessId)}"

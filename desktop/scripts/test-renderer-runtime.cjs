@@ -183,7 +183,19 @@ function harness(handlers = {}, { bind = true } = {}) {
   const dom = makeDOM();
   const events = new Map();
   const calls = [];
-  const methods = { getSkillCatalog: () => catalog(), ...handlers };
+  const defaultAccounts = () => ({
+    selectedId: "default",
+    maxAccounts: 16,
+    securityBoundary: "运行配置档隔离；不是 Windows 用户或系统安全沙箱",
+    accounts: [{
+      id: "default", name: "默认账号（原配置）", dataDir: "D:/fixture/user-data",
+      config: { setupDone: true, mcpPort: 3000, adminPort: 3001, tunnelPort: 8080, workspacePath: "D:/fixture/workspace" },
+      mcp: { state: "stopped", pid: null, owned: false },
+      tunnel: { state: "stopped", pid: null, owned: false, cloudState: "unknown" },
+      busy: false, lastError: "",
+    }],
+  });
+  const methods = { getSkillCatalog: () => catalog(), listAccounts: defaultAccounts, ...handlers };
   const launcher = new Proxy({ on: (name, handler) => events.set(name, handler) }, {
     get(target, name) {
       if (name in target) return target[name];
@@ -194,7 +206,7 @@ function harness(handlers = {}, { bind = true } = {}) {
       };
     },
   });
-  const context = vm.createContext({ document: dom.document, launcher, console, confirm: () => true, setTimeout: () => 0 });
+  const context = vm.createContext({ document: dom.document, launcher, console, confirm: () => true, prompt: () => null, setTimeout: () => 0 });
   vm.runInContext(source.replace(/\ninit\(\);\s*$/, "\n"), context, { filename: "renderer/app.js" });
   const run = (code) => vm.runInContext(code, context);
   if (bind) run("bind()");
@@ -661,4 +673,67 @@ test("isolated renderer always disables external takeover even for recognized pr
   h.run("state.info = { isolated: true }; renderStatus(snapshot)");
   assert.equal(h.node("btn-stop-external").disabled, true);
   assert.equal(h.calls.length, 0, "Status rendering never invokes process-control IPC");
+});
+
+test("account-scoped IPC carries the originating account and rejects a late response after selection changes", async () => {
+  const pending = deferred();
+  const h = harness({ getConfig: () => pending.promise });
+  h.run('state.accountId = "default"');
+  const request = h.run('call("getConfig")');
+  assert.deepEqual(h.calls.at(-1), { name: "getConfig", payload: { _accountId: "default" } });
+  h.run('state.accountId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"');
+  pending.resolve({ setupDone: true });
+  await assert.rejects(request, (error) => error && error.code === "STALE_ACCOUNT_RESPONSE");
+});
+
+test("renderer ignores status-adjacent events from another account", () => {
+  const h = harness();
+  h.run('state.accountId = "default"; state.logs = { mcp: [], tunnel: [], launcher: [] }; renderLog("mcp")');
+  h.emit("log", [{ accountId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", name: "mcp", line: "foreign" }]);
+  assert.equal(h.run("state.logs.mcp.length"), 0);
+  h.emit("log", [{ accountId: "default", name: "mcp", line: "own" }]);
+  assert.deepEqual(json(h.run("state.logs.mcp")), ["own"]);
+  h.emit("notice", { accountId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", level: "error", message: "foreign notice" });
+  assert.doesNotMatch(h.node("toasts").textContent, /foreign notice/);
+  h.emit("notice", { accountId: "default", level: "info", message: "own notice" });
+  assert.match(h.node("toasts").textContent, /own notice/);
+  const before = h.node("setup-progress-title").textContent;
+  h.emit("setup:progress", { accountId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", stage: "message", message: "foreign setup" });
+  assert.equal(h.node("setup-progress-title").textContent, before);
+  h.emit("setup:progress", { accountId: "default", stage: "message", message: "own setup" });
+  assert.equal(h.node("setup-progress-title").textContent, "own setup");
+});
+
+test("switching profiles reloads only the selected account and never stops the previous account", async () => {
+  const secondId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const defaultConfig = { setupDone: true, mcpPort: 3000, adminPort: 3001, tunnelPort: 8080, workspacePath: "D:/fixture/a" };
+  const secondConfig = { setupDone: true, mcpPort: 3400, adminPort: 3401, tunnelPort: 3402, workspacePath: "D:/fixture/b" };
+  const row = (id, name, config, owned = false) => ({
+    id, name, dataDir: `D:/fixture/${id}`, config,
+    mcp: { state: owned ? "running" : "stopped", pid: owned ? 101 : null, owned },
+    tunnel: { state: owned ? "running" : "stopped", pid: owned ? 102 : null, owned, cloudState: owned ? "online" : "unknown" },
+    busy: false, lastError: "",
+  });
+  const firstSnapshot = { selectedId: "default", maxAccounts: 16, securityBoundary: "fixture", accounts: [row("default", "主账号", defaultConfig, true), row(secondId, "第二账号", secondConfig)] };
+  const secondSnapshot = { ...firstSnapshot, selectedId: secondId };
+  const h = harness({
+    selectAccount: ({ id }) => { assert.equal(id, secondId); return secondSnapshot; },
+    appInfo: () => ({ name: "Harness", version: "1", encryptionAvailable: true, isPackaged: true, multiAccount: true }),
+    getConfig: () => secondConfig,
+    getLogs: () => ({ mcp: ["second log"], tunnel: [], launcher: [] }),
+    getStatus: () => ({
+      accountId: secondId, at: 0, busy: false, config: secondConfig,
+      mcp: { managed: false, state: "stopped", healthy: false },
+      tunnel: { managed: false, state: "stopped", ready: false, reachable: false, cloudState: "unknown" },
+      paths: { codeRoot: "fixture-code", runtimeDir: "D:/fixture/b/runtime" },
+    }),
+  });
+  h.context.firstSnapshot = firstSnapshot;
+  h.run('state.accountId = "default"; state.accounts = firstSnapshot; renderAccounts()');
+  await h.run(`switchAccount("${secondId}")`);
+  assert.equal(h.run("state.accountId"), secondId);
+  assert.equal(h.node("dashboard-account-name").textContent, "第二账号");
+  assert.equal(h.node("dashboard-account-endpoints").textContent, "MCP 3400 · Admin 3401 · Tunnel 3402");
+  assert.equal(h.node("log-view").textContent, "second log\n");
+  assert.ok(h.calls.every((call) => !["stopAll", "stopMcp", "stopTunnel", "stopExternal"].includes(call.name)), "Profile switching must not stop another profile's services");
 });

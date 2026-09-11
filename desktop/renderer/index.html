@@ -15,10 +15,19 @@
         <div class="subtitle">Web Harness</div>
       </div>
     </div>
+    <div class="account-switcher" aria-label="账号配置档">
+      <div class="account-label">当前账号</div>
+      <select id="account-select" aria-label="选择账号"></select>
+      <div class="account-actions">
+        <button class="ghost small" id="btn-account-create">+ 新账号</button>
+        <button class="ghost small" id="btn-account-rename">重命名</button>
+      </div>
+      <div class="account-meta" id="account-meta">正在读取账号…</div>
+    </div>
     <nav class="sidebar-nav">
       <button class="nav-item" data-view="dashboard">控制台</button>
       <button class="nav-item" data-view="skills">Skills / 插件</button>
-      <button class="nav-item" data-view="settings">Settings</button>
+      <button class="nav-item" data-view="settings">设置</button>
     </nav>
     <div class="sidebar-status">
       <span class="pill" id="pill-mcp"><i class="dot"></i><span data-label>MCP · 未知</span></span>
@@ -41,31 +50,48 @@
     <main>
       <section class="view" id="view-dashboard">
         <div class="dashboard">
+          <div class="account-banner">
+            <div>
+              <div class="account-banner-title"><span id="dashboard-account-name">当前账号</span><span class="account-id" id="dashboard-account-id">—</span></div>
+              <div class="muted small" id="dashboard-account-detail">每个账号使用独立配置、端口、Tunnel、运行目录与 Skills。</div>
+            </div>
+            <div class="account-banner-actions">
+              <div class="account-endpoints" id="dashboard-account-endpoints">MCP — · Admin — · Tunnel —</div>
+              <button class="ghost small" id="btn-configure-account">配置当前账号</button>
+            </div>
+          </div>
+          <div class="setup-required" id="setup-required" hidden>
+            <div>
+              <b>当前账号尚未完成配置</b>
+              <span>填写独立的 Tunnel ID、Runtime API Key 和工作区后，才可以启动这个账号的 MCP 与 Tunnel。</span>
+            </div>
+            <button class="primary small" id="btn-setup-required">去配置</button>
+          </div>
           <div class="cards">
             <div class="card status-card" id="card-mcp">
               <div class="card-head">
-                <h3>MCP Server</h3>
+                <h3>MCP 服务</h3>
                 <span class="badge" id="badge-mcp"><i class="dot"></i><span data-label>未知</span></span>
               </div>
               <dl>
                 <dt>来源</dt><dd id="mcp-source">—</dd>
                 <dt>PID</dt><dd id="mcp-pid">—</dd>
-                <dt>Build</dt><dd id="mcp-build">—</dd>
+                <dt>构建版本</dt><dd id="mcp-build">—</dd>
                 <dt>工具</dt><dd id="mcp-tools">—</dd>
-                <dt>stale_build</dt><dd id="mcp-stale">—</dd>
-                <dt>Auth</dt><dd id="mcp-auth">—</dd>
+                <dt>构建状态</dt><dd id="mcp-stale">—</dd>
+                <dt>访问认证</dt><dd id="mcp-auth">—</dd>
               </dl>
               <div class="card-actions">
                 <button class="ghost small" id="btn-mcp-start">启动</button>
                 <button class="ghost small" id="btn-mcp-stop">停止</button>
                 <button class="ghost small" id="btn-mcp-restart">重启</button>
                 <button class="link small" id="link-health">/health ↗</button>
-                <button class="link small" id="link-admin">Admin UI ↗</button>
+                <button class="link small" id="link-admin">管理页面 ↗</button>
               </div>
             </div>
             <div class="card status-card" id="card-tunnel">
               <div class="card-head">
-                <h3>Secure MCP Tunnel</h3>
+                <h3>安全隧道</h3>
                 <span class="badge" id="badge-tunnel"><i class="dot"></i><span data-label>未知</span></span>
               </div>
               <dl>
@@ -73,7 +99,7 @@
                 <dt>PID</dt><dd id="tunnel-pid">—</dd>
                 <dt>Tunnel ID</dt><dd id="tunnel-id">—</dd>
                 <dt>本地端口</dt><dd id="tunnel-port">—</dd>
-                <dt>readyz</dt><dd id="tunnel-ready">—</dd>
+                <dt>本地链路</dt><dd id="tunnel-ready">—</dd>
                 <dt>云端轮询</dt><dd id="tunnel-cloud">—</dd>
                 <dt>OpenAI 路由</dt><dd id="tunnel-route">—</dd>
                 <dt>工作区</dt><dd id="tunnel-workspace">—</dd>
@@ -82,14 +108,14 @@
                 <button class="ghost small" id="btn-tunnel-start">启动</button>
                 <button class="ghost small" id="btn-tunnel-stop">停止</button>
                 <button class="link small" id="link-readyz">/readyz ↗</button>
-                <button class="link small" id="link-tunnel-ui">Tunnel UI ↗</button>
+                <button class="link small" id="link-tunnel-ui">隧道页面 ↗</button>
               </div>
             </div>
           </div>
 
           <div class="toolbar">
-            <button class="primary" id="btn-start-all">启动全部</button>
-            <button class="quiet-danger" id="btn-stop-all">停止全部</button>
+            <button class="primary" id="btn-start-all">启动当前账号</button>
+            <button class="quiet-danger" id="btn-stop-all">停止当前账号</button>
             <button class="ghost" id="btn-stop-external" title="终止由旧脚本启动、非本启动器管理的 MCP / Tunnel 进程">接管外部进程</button>
             <span class="spacer"></span>
           </div>
@@ -198,7 +224,11 @@
           <div class="settings-pane active" id="settings-pane-setup">
             <div class="card wide">
               <h2>初始化</h2>
-              <p class="muted">只需要两样东西：在 OpenAI Platform 申请的 <b>Tunnel ID</b> 和 <b>Runtime API Key</b>。Free / Plus / Pro / Business 账号的初始化方式完全一样，只是默认分配的本地端口不同。</p>
+              <p class="muted">你正在配置 <b id="setup-account-name">当前账号</b>。每个账号配置档独立保存 <b>Tunnel ID、Runtime API Key、工作区、端口、日志和 Skills</b>；新账号不会复制其他账号的密钥。</p>
+              <div class="isolation-note">
+                <b>多账号隔离范围</b>
+                <span>运行数据与进程彼此分开，但仍在同一个 Windows 用户下运行，因此这不是操作系统安全沙箱。不要把互不信任的账号当作强安全边界。</span>
+              </div>
               <div class="links">
                 <button class="link" data-url="https://platform.openai.com/settings/organization/tunnels">获取 Tunnel ID ↗</button>
                 <button class="link" data-url="https://platform.openai.com/settings/organization/api-keys">获取 Runtime API Key ↗</button>
@@ -275,16 +305,18 @@
 
           <div class="settings-pane" id="settings-pane-guide">
             <div class="card wide">
-              <h2>在 ChatGPT 网页端发布应用（只需一次）</h2>
+              <h2>连接当前账号到 ChatGPT</h2>
+              <p class="muted">为每个 ChatGPT 账号建立一个独立 Connector，并让名称与本软件里的账号配置档一致。不要让两个账号共用同一个 Tunnel ID。</p>
               <ol class="steps">
-                <li>确认控制台里 <b>MCP</b> 与 <b>Tunnel</b> 都已就绪（隧道必须在线，ChatGPT 才能连接）。</li>
+                <li>确认当前配置档 <b id="guide-account-name">—</b> 的 MCP 与 Tunnel 都已就绪。切换账号不会停止另一个账号；每个账号可同时保持自己的 MCP/Tunnel 进程。</li>
                 <li>打开 <button class="link" data-url="https://chatgpt.com/#settings/Connectors">ChatGPT 设置 → Connectors ↗</button>，先在 <b>Security and login</b> 里开启 <b>Developer mode</b>。</li>
-                <li>新建连接器：Connection 选择 <b>Tunnel</b>（不要选 Server URL，也不要填 localhost），在列表中选中你的 tunnel，或粘贴 Tunnel ID：
+                <li>新建连接器，建议命名为 <code id="guide-connector-name">Web Harness · 当前账号</code>。Connection 选择 <b>Tunnel</b>（不要填 localhost），在列表中选中当前配置档的 tunnel，或粘贴 Tunnel ID：
                   <div class="row"><code id="guide-tunnel-id">—</code><button class="ghost" id="btn-copy-tunnel">复制</button></div>
                 </li>
                 <li>Authentication 保持默认，点击 Create → Connect。</li>
                 <li>进入 <b>Settings → Apps</b>，找到这个应用，权限设为 <b>Allow all actions / Never ask</b>，否则 Goal 连续执行会被反复弹窗打断。</li>
                 <li>新开一个对话，添加该应用，先发一条只读探针：<code>请只读取工作区目录列表，不要修改任何文件。</code> 看到工具卡片并返回本地文件列表即成功。</li>
+                <li>第二个账号：回到本软件点 <b>+ 新账号</b> → 切换到新配置档 → 填写该账号自己的 Tunnel ID / Runtime API Key → 启动当前账号 → 在第二个 ChatGPT 账号里创建对应 Connector。无需关闭第一个账号。</li>
               </ol>
             </div>
           </div>
@@ -292,6 +324,27 @@
       </section>
     </main>
   </div>
+
+  <dialog class="account-dialog" id="account-dialog">
+    <form method="dialog" id="account-dialog-form">
+      <div class="account-dialog-head">
+        <div>
+          <div class="account-dialog-title" id="account-dialog-title">新建账号</div>
+          <div class="muted small" id="account-dialog-description">为这个 ChatGPT 账号创建独立的本地配置档。</div>
+        </div>
+        <button type="button" class="dialog-close" id="account-dialog-close" aria-label="关闭">×</button>
+      </div>
+      <label class="account-dialog-field">
+        <span>账号名称</span>
+        <input id="account-dialog-name" type="text" maxlength="64" autocomplete="off" spellcheck="false" />
+      </label>
+      <div class="account-dialog-hint">建议与 ChatGPT 中对应的 Connector 名称保持一致，方便区分多个账号。</div>
+      <div class="account-dialog-actions">
+        <button type="button" class="ghost" id="account-dialog-cancel">取消</button>
+        <button type="submit" class="primary" id="account-dialog-submit">创建账号</button>
+      </div>
+    </form>
+  </dialog>
 
   <div class="toasts" id="toasts"></div>
   <footer class="footer" id="footer">—</footer>

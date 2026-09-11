@@ -1,0 +1,11 @@
+{
+    "component":  "OpenAI tunnel-client",
+    "version":  "v0.0.10",
+    "license":  "Apache-2.0",
+    "source":  "https://github.com/openai/tunnel-client/tree/v0.0.10",
+    "archive_url":  "https://github.com/openai/tunnel-client/releases/download/v0.0.10/tunnel-client-v0.0.10-windows-amd64.zip",
+    "checksums_url":  "https://github.com/openai/tunnel-client/releases/download/v0.0.10/SHA256SUMS.txt",
+    "archive_sha256":  "5e64a056f1d96786da0a6f8db1da5f5f4a03fd19a90d951a25cf2ca8d9093d00",
+    "executable_sha256":  "d893d8127eee35070d265c1be29bfe008f8d9fcb476e7febf56c8fdc6c0615c8",
+    "official_archive_matches":  true
+}

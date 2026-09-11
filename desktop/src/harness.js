@@ -5,6 +5,7 @@ const path = require("path");
 const paths = require("./paths");
 const configStore = require("./config");
 const { profile } = require("./app-profile");
+const accountContext = require("./account-context");
 const { isolatedEnvironment } = require("./isolated-runtime");
 const { resolveTunnelProxy, applyTunnelProxy } = require("./tunnel-proxy");
 
@@ -16,7 +17,7 @@ function baseEnv() {
     if (key === "NODE_OPTIONS") continue;
     env[key] = value;
   }
-  return profile.isolated ? isolatedEnvironment(env, paths.runtimeDir()) : env;
+  return profile.isolated || accountContext.current() ? isolatedEnvironment(env, paths.runtimeDir()) : env;
 }
 
 /** 首次运行时从 .env.example 生成 .env（dotenv 只在变量未设置时才读取它）。 */
@@ -56,6 +57,7 @@ function ensureNodeShim() {
 function mcpSpawnSpec(config) {
   const env = baseEnv();
   env.ELECTRON_RUN_AS_NODE = "1";
+  if (accountContext.current()) env.HARNESS_ACCOUNT_ID = accountContext.current().id;
   env.ELECTRON_NO_ATTACH_CONSOLE = "1";
   env.PORT = String(config.mcpPort);
   env.HOST = "127.0.0.1";
@@ -68,7 +70,7 @@ function mcpSpawnSpec(config) {
   env.MCP_SHELL_STATE_DIR = path.join(paths.runtimeDir(), ".mcp-state");
   const hadStoredToken = Boolean(config && config.adminTokenEnc);
   const adminToken = configStore.ensureAdminToken(config || {});
-  if (!hadStoredToken && (profile.isolated || !process.env.ADMIN_TOKEN) && config?.adminTokenEnc) {
+  if (!hadStoredToken && (profile.isolated || accountContext.current() || !process.env.ADMIN_TOKEN) && config?.adminTokenEnc) {
     // First-run generation is persisted only after safeStorage encryption;
     // never write a plaintext token or log its value.
     configStore.save(config);

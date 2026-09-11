@@ -80,6 +80,7 @@ const unitScripts = [
   "desktop/scripts/test-stage-sanitize.mjs",
   "desktop/scripts/test-zip-safety.mjs",
   "scripts/test-result-pipeline.mjs",
+  "scripts/test-quality-feedback.mjs",
   "scripts/test-goal-run-state.mjs",
   "scripts/test-goal-run-store.mjs",
   "scripts/test-goal-run-policy.mjs",
@@ -89,6 +90,7 @@ const unitScripts = [
   "scripts/test-shell-persist.mjs",
   "scripts/test-agent-harness.mjs",
   "scripts/test-visual-review.mjs",
+  "scripts/test-svg-review-coverage.mjs",
   "scripts/test-office-visual-review.mjs",
 ];
 

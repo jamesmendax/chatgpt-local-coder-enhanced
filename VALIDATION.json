@@ -1,0 +1,142 @@
+{
+  "schemaVersion": 1,
+  "product": "ChatGPT Web Harness Isolated",
+  "version": "0.2.0",
+  "platform": "Windows x64",
+  "scope": "Local source, GUI, installer and Portable acceptance; not cloud-account approval or external publication",
+  "packageAcceptanceCompletedAt": "2026-09-11T05:42:27.159Z",
+  "artifacts": [
+    {
+      "name": "ChatGPT Web Harness Isolated-0.2.0-portable.exe",
+      "bytes": 108480828,
+      "sha256": "8c3685451e186e3ddf0ae9a573a78a0049274a81132bc58e88059932319aea0b",
+      "authenticode": "NotSigned"
+    },
+    {
+      "name": "ChatGPT Web Harness Isolated-0.2.0-setup.exe",
+      "bytes": 108716280,
+      "sha256": "9a01b1f31e48a6eb3396c95856a9f64f54646d45f3433b21100c252dbbd6e2bf",
+      "authenticode": "NotSigned"
+    }
+  ],
+  "tests": {
+    "root": [
+      {
+        "name": "root-all",
+        "exit_code": 0,
+        "timed_out": false,
+        "passed": true
+      },
+      {
+        "name": "upstream",
+        "exit_code": 0,
+        "timed_out": false,
+        "passed": true
+      },
+      {
+        "name": "oauth",
+        "exit_code": 0,
+        "timed_out": false,
+        "passed": true
+      },
+      {
+        "name": "bridge",
+        "exit_code": 0,
+        "timed_out": false,
+        "passed": true
+      }
+    ],
+    "rootSourceUnchanged": true,
+    "desktop": [
+      {
+        "name": "desktop-all",
+        "exit_code": 0,
+        "timed_out": false,
+        "passed": true
+      }
+    ],
+    "finalSourceFingerprint": "e0892bcd77f8f3f41dafe518c54253b9c05e339160584eed7177fc5974e6a314",
+    "packaged": [
+      {
+        "name": "Candidate installer and Portable exist, have PE signatures and are version-addressed",
+        "passed": true
+      },
+      {
+        "name": "Portable fresh run uses bundled runtime, no inherited config/key/Skills or auto-start",
+        "passed": true
+      },
+      {
+        "name": "Real GUI creates, renames and switches private accounts; invalid cross-account configuration is rejected",
+        "passed": true
+      },
+      {
+        "name": "Two real bundled MCP processes run concurrently; switching and stopping B preserve A",
+        "passed": true
+      },
+      {
+        "name": "Packaged Skills are account-scoped; nested same-name files and real load_skill/node shim work without global Node",
+        "passed": true
+      },
+      {
+        "name": "Actual packaged narrow window keeps controls visible, has no overflow or renderer exceptions",
+        "passed": true
+      },
+      {
+        "name": "Portable restart preserves both configurations without auto-start; Skill uninstall is scoped",
+        "passed": true
+      },
+      {
+        "name": "Real NSIS installer registers only isolated candidate; installed app starts bundled MCP and keeps account data",
+        "passed": true
+      },
+      {
+        "name": "Silent uninstall removes only installed candidate and preserves data; original installation and live service unchanged",
+        "passed": true
+      }
+    ],
+    "cleanupPassed": true
+  },
+  "runtime": {
+    "electron": "41.10.3",
+    "node": "24.18.0",
+    "requiresGlobalNode": false
+  },
+  "dependencies": {
+    "cleanRootBuild": true,
+    "cleanDesktopNpmCi": true,
+    "knownDesktopAuditVulnerabilities": 0,
+    "auditScope": "npm audit against the pinned desktop dependency graph at validation time; not a guarantee against unknown vulnerabilities",
+    "rootLockSha256": "09980e4b26bac51fece139921246f8d383fc741b7d8138aeec5015b0476bbef8",
+    "desktopLockSha256": "2138bb303caa9080d85dc1eeb8ee1bf3b331375edc3d4cd560b88754df9b4900"
+  },
+  "payload": {
+    "passed": true,
+    "sourceFingerprint": "e0892bcd77f8f3f41dafe518c54253b9c05e339160584eed7177fc5974e6a314",
+    "payloadFiles": 2535,
+    "payloadBytes": 43931089,
+    "compiledRuntimeFilesCompared": 154,
+    "desktopFilesCompared": 25,
+    "stagingBytesMatch": true,
+    "sourceToPayloadMatch": true,
+    "noticesIncluded": true,
+    "privateStateFilesAbsent": true,
+    "appAsarSha256": "9e0277c798d87f5230fcacb704fdfb142ce62e1992a41c0f7fd2c1423dd3c00f"
+  },
+  "visual": {
+    "actualPackagedViews": 8,
+    "semantic": "pass",
+    "qualityBar": "polished",
+    "qualityGate": "acceptable",
+    "coverageComplete": true,
+    "requiredRefinementRemaining": false,
+    "originalScreenshotsPublished": false
+  },
+  "limitations": [
+    "Unsigned Windows installer and Portable; publisher reputation and code-signing certification were not established.",
+    "Two local bundled MCP instances were verified. Two real ChatGPT cloud-account tunnel connections were not tested.",
+    "Account separation is configuration/process separation under one Windows user, not an OS security sandbox.",
+    "No automatic migration of another product's credentials and no replacement of the existing installation.",
+    "No GitHub push, tag or Release was performed.",
+    "Lock-based source builds were verified; independently rebuilt installer bytes may differ because of build metadata and timestamps."
+  ]
+}

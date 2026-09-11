@@ -111,6 +111,22 @@ interface BrowserCaptureResult {
   diagnostics: Record<string, unknown>;
 }
 
+interface SvgCanvasDiagnostics {
+  capture_mode: "fit_canvas" | "incomplete";
+  full_canvas_captured: boolean;
+  has_view_box: boolean;
+  synthetic_view_box: boolean;
+  source_width?: number;
+  source_height?: number;
+  effective_view_box?: { x: number; y: number; width: number; height: number };
+  output_width: number;
+  output_height: number;
+  fitted_width?: number;
+  fitted_height?: number;
+  viewport_applied: boolean;
+  reason?: string;
+}
+
 function clampInteger(value: number | undefined, fallback: number, min: number, max: number): number {
   const normalized = Number.isFinite(value) ? Math.floor(value as number) : fallback;
   return Math.max(min, Math.min(max, normalized));
@@ -344,7 +360,10 @@ async function withVisualPage<T>(
     `${label} open`,
     deadline,
     () => {
-      pagePromise = browser.newPage(viewport);
+      pagePromise = browser.newPage({
+        viewport: { width: viewport.width, height: viewport.height },
+        deviceScaleFactor: viewport.deviceScaleFactor,
+      });
       return pagePromise;
     },
     () => {
@@ -487,6 +506,122 @@ async function waitForVisualStability(page: Page, deadline: VisualDeadline): Pro
   );
 }
 
+async function fitSvgCanvasToViewport(
+  page: Page,
+  width: number,
+  height: number,
+  deadline: VisualDeadline,
+  viewportApplied: boolean
+): Promise<SvgCanvasDiagnostics> {
+  return withVisualDeadline("SVG canvas fit", deadline, () => page.evaluate(({ outputWidth, outputHeight, viewportWasApplied }) => {
+    const incomplete = (reason: string): SvgCanvasDiagnostics => ({
+      capture_mode: "incomplete",
+      full_canvas_captured: false,
+      has_view_box: false,
+      synthetic_view_box: false,
+      output_width: outputWidth,
+      output_height: outputHeight,
+      viewport_applied: viewportWasApplied,
+      reason,
+    });
+    const root = document.documentElement;
+    if (!root || root.tagName.toLowerCase() !== "svg") {
+      return incomplete("The SVG document root was not available as an SVG element.");
+    }
+    const svg = root as unknown as SVGSVGElement;
+    const parseLength = (raw: string | null): number | undefined => {
+      if (!raw) return undefined;
+      const match = raw.trim().match(/^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)\s*(px|pt|pc|in|cm|mm|q)?$/i);
+      if (!match) return undefined;
+      const value = Number(match[1]);
+      if (!Number.isFinite(value) || value <= 0) return undefined;
+      const units = { px: 1, pt: 96 / 72, pc: 16, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, q: 96 / 101.6 } as Record<string, number>;
+      const converted = value * (units[(match[2] || "px").toLowerCase()] || 1);
+      return Number.isFinite(converted) && converted > 0 ? converted : undefined;
+    };
+    const parseViewBox = (raw: string | null): { x: number; y: number; width: number; height: number } | undefined => {
+      if (!raw) return undefined;
+      const values = raw.trim().split(/[\s,]+/).map(Number);
+      if (values.length !== 4 || values.some((value) => !Number.isFinite(value)) || values[2] <= 0 || values[3] <= 0) return undefined;
+      return { x: values[0], y: values[1], width: values[2], height: values[3] };
+    };
+    const originalViewBox = parseViewBox(svg.getAttribute("viewBox"));
+    const widthAttr = parseLength(svg.getAttribute("width"));
+    const heightAttr = parseLength(svg.getAttribute("height"));
+    const effectiveViewBox = originalViewBox || (
+      widthAttr && heightAttr
+        ? { x: 0, y: 0, width: widthAttr, height: heightAttr }
+        : undefined
+    );
+    if (!effectiveViewBox) {
+      return incomplete("The SVG has no valid viewBox or explicit width/height from which a complete canvas can be derived. Supply an artboard before review; drawable bounds alone omit margins and effects.");
+    }
+    // Fit the authored outer canvas without changing its viewBox mapping.
+    const sourceWidth = widthAttr ?? (heightAttr ? heightAttr * effectiveViewBox.width / effectiveViewBox.height : effectiveViewBox.width);
+    const sourceHeight = heightAttr ?? (widthAttr ? widthAttr * effectiveViewBox.height / effectiveViewBox.width : effectiveViewBox.height);
+    const scale = Math.min(outputWidth / sourceWidth, outputHeight / sourceHeight);
+    if (!Number.isFinite(scale) || scale <= 0) {
+      return incomplete("The SVG canvas aspect ratio cannot be fitted to the requested output bounds.");
+    }
+    const syntheticViewBox = !originalViewBox;
+    if (syntheticViewBox) {
+      svg.setAttribute("viewBox", `${effectiveViewBox.x} ${effectiveViewBox.y} ${effectiveViewBox.width} ${effectiveViewBox.height}`);
+    }
+    const fittedWidth = sourceWidth * scale;
+    const fittedHeight = sourceHeight * scale;
+    const left = (outputWidth - fittedWidth) / 2;
+    const top = (outputHeight - fittedHeight) / 2;
+    svg.style.setProperty("display", "block", "important");
+    svg.style.setProperty("position", "fixed", "important");
+    svg.style.setProperty("left", `${left}px`, "important");
+    svg.style.setProperty("top", `${top}px`, "important");
+    svg.style.setProperty("margin", "0", "important");
+    svg.style.setProperty("width", `${fittedWidth}px`, "important");
+    svg.style.setProperty("height", `${fittedHeight}px`, "important");
+    svg.style.setProperty("max-width", "none", "important");
+    svg.style.setProperty("max-height", "none", "important");
+    svg.style.setProperty("overflow", "hidden", "important");
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const rect = svg.getBoundingClientRect();
+    const fitsViewport = viewportWasApplied && viewportWidth === outputWidth && viewportHeight === outputHeight &&
+      Math.abs(rect.x - left) <= 1 && Math.abs(rect.y - top) <= 1 &&
+      Math.abs(rect.width - fittedWidth) <= 1 && Math.abs(rect.height - fittedHeight) <= 1 &&
+      rect.x >= -1 && rect.y >= -1 && rect.right <= outputWidth + 1 && rect.bottom <= outputHeight + 1;
+    if (!fitsViewport) {
+      return {
+        capture_mode: "incomplete",
+        full_canvas_captured: false,
+        has_view_box: Boolean(originalViewBox),
+        synthetic_view_box: syntheticViewBox,
+        source_width: sourceWidth,
+        source_height: sourceHeight,
+        effective_view_box: effectiveViewBox,
+        output_width: outputWidth,
+        output_height: outputHeight,
+        fitted_width: sourceWidth * scale,
+        fitted_height: sourceHeight * scale,
+        viewport_applied: viewportWasApplied,
+        reason: `SVG canvas did not fit inside the requested viewport (${viewportWidth}x${viewportHeight}); full canvas evidence is incomplete.`,
+      };
+    }
+    return {
+      capture_mode: "fit_canvas",
+      full_canvas_captured: true,
+      has_view_box: Boolean(originalViewBox),
+      synthetic_view_box: syntheticViewBox,
+      source_width: sourceWidth,
+      source_height: sourceHeight,
+      effective_view_box: effectiveViewBox,
+      output_width: outputWidth,
+      output_height: outputHeight,
+      fitted_width: sourceWidth * scale,
+      fitted_height: sourceHeight * scale,
+      viewport_applied: viewportWasApplied,
+    };
+  }, { outputWidth: width, outputHeight: height, viewportWasApplied: viewportApplied }));
+}
+
 async function captureSelectorFocus(
   page: Page,
   focusItems: VisualFocusInput[],
@@ -586,7 +721,8 @@ async function captureBrowserArtifact(
   height: number,
   deadline: VisualDeadline,
   fullPage: boolean,
-  focusItems: VisualFocusInput[]
+  focusItems: VisualFocusInput[],
+  fitSvgCanvas: boolean
 ): Promise<BrowserCaptureResult> {
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
@@ -603,8 +739,34 @@ async function captureBrowserArtifact(
       });
       page.on("pageerror", (error) => pageErrors.push(error.message.slice(0, 1000)));
       page.on("requestfailed", (request) => requestFailures.push(`${request.method()} ${request.url()} ${request.failure()?.errorText || "failed"}`.slice(0, 1000)));
+      let svgViewportApplied = false;
+      if (fitSvgCanvas) {
+        try {
+          await withVisualDeadline("SVG viewport setup", deadline, () => page.setViewportSize({ width, height }));
+          svgViewportApplied = true;
+        } catch (error) {
+          pageErrors.push(`SVG viewport setup failed: ${normalizeVisualError(error).message}`);
+        }
+      }
       await page.goto(resolved.target, { waitUntil: "domcontentloaded", timeout: visualOperationTimeout(deadline, "Visual page navigation") });
       await waitForVisualStability(page, deadline);
+      let svgCanvas: SvgCanvasDiagnostics | undefined;
+      if (fitSvgCanvas) {
+        try {
+          svgCanvas = await fitSvgCanvasToViewport(page, width, height, deadline, svgViewportApplied);
+        } catch (error) {
+          svgCanvas = {
+            capture_mode: "incomplete",
+            full_canvas_captured: false,
+            has_view_box: false,
+            synthetic_view_box: false,
+            output_width: width,
+            output_height: height,
+            viewport_applied: svgViewportApplied,
+            reason: `SVG canvas fit failed: ${normalizeVisualError(error).message}`,
+          };
+        }
+      }
       const metrics = await withVisualDeadline("Visual page metrics", deadline, () => pageMetrics(page));
       const documentHeight = Number(metrics.document_height) || height;
       const documentWidth = Number(metrics.document_width) || width;
@@ -619,9 +781,14 @@ async function captureBrowserArtifact(
       });
       const selectorFocus = await captureSelectorFocus(page, focusItems, outputDir, deadline);
       const machineIssues = [
+        ...(Number(metrics.viewport_width) !== width || Number(metrics.viewport_height) !== height
+          ? ["Requested viewport was not applied; capture geometry is not verified."] : []),
+        ...(fullPage && !useFullPage
+          ? ["Requested full-page capture exceeds the safe render size and is incomplete. Review bounded sections or a paginated export before claiming full-document completion."] : []),
         ...pageErrors.map((error) => `Page error: ${error}`),
         ...consoleErrors.map((error) => `Console error: ${error}`),
         ...selectorFocus.issues,
+        ...(svgCanvas && !svgCanvas.full_canvas_captured ? [`SVG canvas capture incomplete: ${svgCanvas.reason || "the requested canvas was not fully fitted to the output viewport"}.`] : []),
       ];
       const clippedCount = Number(metrics.clipped_element_count) || 0;
       const advisories = [
@@ -642,6 +809,7 @@ async function captureBrowserArtifact(
           request_failures: requestFailures,
           full_page_requested: fullPage,
           full_page_captured: useFullPage,
+          ...(svgCanvas ? { svg_canvas: svgCanvas } : {}),
           browser: findVisualBrowserExecutable(),
         },
       };
@@ -804,7 +972,7 @@ async function renderPdfPages(
             }
           }
         }
-        if (screenshotError) throw screenshotError;
+        if (screenshotError) throw new Error(`Visual PDF page ${pageNumber} capture failed after bounded retries: ${normalizeVisualError(screenshotError).message}`, { cause: screenshotError });
         return outputPath;
         }
       );
@@ -1011,7 +1179,7 @@ async function createContactSheet(imagePaths: string[], outputPath: string, dead
       fullPage: true,
       animations: "disabled",
       timeout: visualOperationTimeout(deadline, "Visual contact sheet screenshot"),
-    });
+    }).catch((error) => { throw new Error(`Visual contact sheet capture failed (${imagePaths.length} pages): ${normalizeVisualError(error).message}`, { cause: error }); });
     return outputPath;
     }
   ));
@@ -1182,7 +1350,10 @@ async function renderArtifact(
       input.height,
       deadline,
       input.full_page,
-      focus.filter((item) => Boolean(item.selector))
+      focus.filter((item) => Boolean(item.selector)),
+      // A local SVG is a bounded canvas artifact. Keep remote URL/HTML
+      // viewport semantics unchanged, even when a caller supplies kind=svg.
+      kind === "svg" && Boolean(resolved.sourcePath)
     );
     const pageMap = new Map<number, string>([[1, captured.overviewPath]]);
     const regions = await cropRasterRegions(pageMap, focus, outputDir, deadline);

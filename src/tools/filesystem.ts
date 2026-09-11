@@ -43,12 +43,14 @@ function boundedLines(
   lines: string[],
   start: number,
   end: number,
-  numbered: boolean
+  numbered: boolean,
+  characterOffset = 0
 ): {
   content: string;
   lines_read: number;
   truncated: boolean;
   next_offset: number | null;
+  next_character_offset: number | null;
   single_line_truncated: boolean;
 } {
   const output: string[] = [];
@@ -56,17 +58,23 @@ function boundedLines(
   let index = start;
   let chars = 0;
   let singleLineTruncated = false;
+  let nextCharacterOffset = 0;
 
   for (; index < boundedEnd; index++) {
-    const rendered = numbered
-      ? `${String(index + 1).padStart(6, " ")}|${lines[index]}`
-      : lines[index];
+    const lineOffset = index === start ? characterOffset : 0;
+    const prefix = numbered ? `${String(index + 1).padStart(6, " ")}|` : "";
+    const line = lines[index].slice(lineOffset);
+    const rendered = prefix + line;
     const extra = rendered.length + (output.length ? 1 : 0);
     if (chars + extra > MAX_TEXT_RESULT_CHARS) {
       if (output.length === 0) {
-        output.push(rendered.slice(0, MAX_TEXT_RESULT_CHARS));
+        let taken = MAX_TEXT_RESULT_CHARS - prefix.length;
+        // Do not split a UTF-16 surrogate pair at the continuation boundary.
+        const last = line.charCodeAt(taken - 1);
+        if (last >= 0xd800 && last <= 0xdbff) taken--;
+        output.push(prefix + line.slice(0, taken));
         singleLineTruncated = true;
-        index++;
+        nextCharacterOffset = lineOffset + taken;
       }
       break;
     }
@@ -74,12 +82,13 @@ function boundedLines(
     chars += extra;
   }
 
-  const truncated = index < end;
+  const truncated = singleLineTruncated || index < Math.min(end, lines.length);
   return {
     content: output.join("\n"),
-    lines_read: Math.max(0, index - start),
+    lines_read: output.length,
     truncated,
     next_offset: truncated ? index + 1 : null,
+    next_character_offset: truncated ? nextCharacterOffset : null,
     single_line_truncated: singleLineTruncated,
   };
 }
@@ -373,10 +382,11 @@ export function registerFilesystemTools(server: McpServer, workspaceRoot: string
     "read_text_file",
     {
       title: "Read Text File",
-      description: "Read a file before editing. Use offset+limit for partial reads (1-based line numbers). Results are bounded; continue from next_offset. Very large text files require grep or targeted shell extraction. The first chunk also returns nested AGENTS/CLAUDE and path-scoped rules for this file.",
+      description: "Read a file before editing. offset+limit use 1-based lines. Continue bounded results with next_offset and next_character_offset (as character_offset) so long lines are not lost. The first chunk also returns applicable nested instructions. Very large files need grep or targeted extraction.",
       inputSchema: {
         path: z.string(),
         offset: z.number().int().positive().optional().describe("1-based line number to start reading"),
+        character_offset: z.number().int().nonnegative().optional().describe("0-based character offset within the starting line; use with offset to resume a long line"),
         limit: z.number().int().positive().optional().describe("Number of lines to read from offset"),
         head: z.number().optional(),
         tail: z.number().optional(),
@@ -384,7 +394,10 @@ export function registerFilesystemTools(server: McpServer, workspaceRoot: string
 
       annotations: toolAnnotations("read"),
     },
-    async ({ path: filePath, offset, limit, head, tail }) => {
+    async ({ path: filePath, offset, character_offset, limit, head, tail }) => {
+      if (character_offset !== undefined && (offset === undefined || head !== undefined || tail !== undefined)) {
+        throw new Error("character_offset requires offset and cannot be combined with head or tail.");
+      }
       const validPath = await validatePath(filePath);
       const stat = await fs.stat(validPath);
       if (!stat.isFile()) throw new Error("Path is not a regular file");
@@ -395,7 +408,10 @@ export function registerFilesystemTools(server: McpServer, workspaceRoot: string
       }
       const content = await fs.readFile(validPath, "utf-8");
       const lines = content.split("\n");
-      const includeApplicableInstructions = tail === undefined && (offset === undefined || offset <= 1);
+      if (character_offset !== undefined && character_offset > (lines[(offset ?? 1) - 1]?.length ?? 0)) {
+        throw new Error("character_offset is past the end of the starting line; use the continuation offsets from the preceding read.");
+      }
+      const includeApplicableInstructions = tail === undefined && (offset === undefined || offset <= 1) && !character_offset;
       const applicableInstructions = includeApplicableInstructions
         ? (await loadPathRulesForFile(workspaceRoot, validPath)).filter(
             (rule) => rule.path !== validPath && (rule.kind === "path_rule" || rule.depth > 0)
@@ -411,17 +427,19 @@ export function registerFilesystemTools(server: McpServer, workspaceRoot: string
       if (offset !== undefined) {
         const start = Math.max(0, offset - 1);
         const end = limit !== undefined ? start + limit : lines.length;
-        const bounded = boundedLines(lines, start, end, true);
+        const bounded = boundedLines(lines, start, end, true, character_offset);
         await audit({ tool: "read_text_file", action: "read", target: validPath, status: "ok", details: { offset, limit } });
         return toolResult("read_text_file", {
           path: validPath,
           content: bounded.content,
           offset,
+          character_offset: character_offset ?? 0,
           limit,
           lines: bounded.lines_read,
           total_lines: lines.length,
           truncated: bounded.truncated,
           next_offset: bounded.next_offset,
+          next_character_offset: bounded.next_character_offset,
           single_line_truncated: bounded.single_line_truncated,
           ...instructionData,
         });
@@ -452,6 +470,7 @@ export function registerFilesystemTools(server: McpServer, workspaceRoot: string
         total_lines: lines.length,
         truncated: bounded.truncated,
         next_offset: bounded.next_offset,
+        next_character_offset: bounded.next_character_offset,
         single_line_truncated: bounded.single_line_truncated,
         ...instructionData,
       });

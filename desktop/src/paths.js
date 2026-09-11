@@ -6,6 +6,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 const { validatePayload } = require("./payload-manifest");
 const { profile } = require("./app-profile");
+const accountContext = require("./account-context");
 
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 // Electron normally derives userData from the package name, but a packaged
@@ -28,19 +29,20 @@ function codeRoot() {
  * CLC_RUNTIME_DIR 可覆盖（测试用）。
  */
 function runtimeDir() {
-  if (profile.isolated) return path.join(app.getPath("userData"), "runtime");
+  const account = accountContext.current();
+  if (account && account.id !== "default") return accountContext.assertUnlinked(path.join(account.dataDir, "runtime"));
+  if (profile.isolated) return accountPath("runtime");
   const override = (process.env.CLC_RUNTIME_DIR || "").trim();
   if (override) return path.resolve(override);
   return isPackaged() ? path.join(app.getPath("userData"), "runtime") : REPO_ROOT;
 }
 
-function logsDir() {
-  return path.join(app.getPath("userData"), "logs");
+function accountPath(leaf) {
+  const target = path.join(accountContext.dataDir(app.getPath("userData")), leaf);
+  return accountContext.current() ? accountContext.assertUnlinked(target) : target;
 }
-
-function configPath() {
-  return path.join(app.getPath("userData"), "config.json");
-}
+function logsDir() { return accountPath("logs"); }
+function configPath() { return accountPath("config.json"); }
 
 function distEntry() {
   return path.join(codeRoot(), "dist", "index.js");
@@ -72,7 +74,7 @@ const EMPTY_PLUGINS = {
 };
 const EMPTY_UPSTREAM = { version: 1, servers: [] };
 const LEGACY_UPSTREAM_SEED_SHA256 = "B4477E75C61B4AF8929E98AEC00C979847A2AD12A7F18F47CAFB032538992599";
-let migrationStatus = { changed: false, errors: [], manifest: null };
+const migrationByRuntime = new Map();
 
 function atomicWriteJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -307,7 +309,7 @@ function migrateRuntimeProfiles() {
   if (!previous || previous.desktop_version !== manifest.desktop_version || previous.harness_version !== manifest.harness_version || previous.plugins_sha256 !== manifest.plugins_sha256 || previous.upstream_sha256 !== manifest.upstream_sha256) {
     try { atomicWriteJson(manifestFile, manifest); changed = true; } catch (err) { errors.push(`写入播种清单失败: ${err.message}`); }
   }
-  migrationStatus = { changed, errors, manifest };
+  migrationByRuntime.set(runtimeDir(), { changed, errors, manifest });
   return dir;
 }
 
@@ -330,11 +332,12 @@ function resetRuntimeProfiles() {
   if (fs.existsSync(upstream)) copyBackup(upstream, `reset-${Date.now()}.bak`);
   atomicWriteJson(plugins, EMPTY_PLUGINS);
   atomicWriteJson(upstream, EMPTY_UPSTREAM);
-  migrationStatus = { changed: true, errors: [], manifest: null };
+  migrationByRuntime.set(runtimeDir(), { changed: true, errors: [], manifest: null });
   return { plugins, upstream, localSkillsDir: path.join(profiles, "local-skills") };
 }
 
 function getMigrationStatus() {
+  const migrationStatus = migrationByRuntime.get(runtimeDir()) || { changed: false, errors: [], manifest: null };
   return { ...migrationStatus, errors: [...migrationStatus.errors] };
 }
 

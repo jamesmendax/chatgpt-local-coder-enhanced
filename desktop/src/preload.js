@@ -4,6 +4,10 @@ const { contextBridge, ipcRenderer } = require("electron");
 const invoke = (channel) => (payload) => ipcRenderer.invoke(channel, payload);
 
 contextBridge.exposeInMainWorld("launcher", {
+  listAccounts: invoke("accounts:list"),
+  createAccount: invoke("accounts:create"),
+  selectAccount: invoke("accounts:select"),
+  renameAccount: invoke("accounts:rename"),
   appInfo: invoke("app:info"),
   getConfig: invoke("config:get"),
   saveConfig: invoke("config:save"),
@@ -41,7 +45,7 @@ contextBridge.exposeInMainWorld("launcher", {
   openRuntimeFolder: invoke("shell:openRuntime"),
   copyText: invoke("clipboard:copy"),
   on(channel, callback) {
-    const allowed = new Set(["status", "log", "setup:progress", "notice"]);
+    const allowed = new Set(["status", "log", "setup:progress", "notice", "accounts:changed"]);
     if (!allowed.has(channel)) return () => {};
     const listener = (_event, data) => callback(data);
     ipcRenderer.on(channel, listener);

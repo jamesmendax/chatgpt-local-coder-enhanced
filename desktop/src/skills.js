@@ -5,6 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const { pathToFileURL } = require("url");
 const paths = require("./paths");
+const accountContext = require("./account-context");
 
 let resolverPromise;
 let pluginConfigPromise;
@@ -86,7 +87,8 @@ async function catalog(workspacePath) {
     codeRoot: paths.codeRoot(),
     installedDir: skillPaths.localSkillsDir,
     registry: config,
-    codexHome: process.env.CODEX_HOME || path.join(process.env.USERPROFILE || process.env.HOME || paths.runtimeDir(), ".codex"),
+    codexHome: accountContext.current() ? path.join(paths.runtimeDir(), ".codex")
+      : process.env.CODEX_HOME || path.join(process.env.USERPROFILE || process.env.HOME || paths.runtimeDir(), ".codex"),
     platform: process.platform,
   });
   return groupCatalog(all, config, workspacePath);

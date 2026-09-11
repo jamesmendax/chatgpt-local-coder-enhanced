@@ -7,6 +7,7 @@ import { appendAutoMemory } from "./auto-memory.js";
 import { inferProjectScope } from "./project-scope.js";
 import { notifyStateInvalidated } from "./state-invalidate.js";
 import { getRuntimeScope } from "./runtime-scope.js";
+import { normalizeGoalVerification, type GoalVerification } from "./goal-verification.js";
 
 export type GoalStatus = "active" | "paused" | "completed" | "cancelled";
 
@@ -15,6 +16,7 @@ export interface GoalCriterion {
   passed: boolean;
   detail?: string;
   requires_confirmation?: boolean;
+  verification?: GoalVerification;
 }
 
 export interface DurableGoal {
@@ -173,6 +175,8 @@ function normalizeCriteria(input: unknown, existing: GoalCriterion[] = []): Goal
     const criterion: GoalCriterion = {
       name,
       passed: typeof item.passed === "boolean" ? item.passed : previous?.passed ?? false,
+      ...(item.verification !== undefined || previous?.verification
+        ? { verification: normalizeGoalVerification(item.verification ?? previous?.verification) } : {}),
       ...(item.requires_confirmation === true || previous?.requires_confirmation
         ? { requires_confirmation: true }
         : {}),

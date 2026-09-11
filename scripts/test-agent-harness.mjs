@@ -92,7 +92,7 @@ try {
     arguments: {
       action: "create",
       objective: "Verify Goal Mode keeps the agent focused until evidence is complete",
-      success_criteria: [{ name: "tests pass", passed: false }],
+      success_criteria: [{ name: "tests pass", passed: false, verification: { kind: "command", target: workspace, command: "node --test", files: ["sample.test.mjs"] } }],
       current_phase: "Run harness checks",
     },
   }));

@@ -120,6 +120,7 @@ function createServices(h, options = {}) {
     },
     // Existing cases cover the compatible non-isolated controller; isolated ownership is tested explicitly below.
     "./app-profile": { profile: { isolated: options.isolated === true } },
+    "./account-context": { current: () => options.accountScoped ? { id: "fixture-account" } : null },
     "./status": options.status || h.status,
     "./tunnel-health": h.healthModule,
     "./harness": { ensureDotEnv: forbidden, mcpSpawnSpec: forbidden, tunnelSpawnSpec: forbidden },

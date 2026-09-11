@@ -17,8 +17,8 @@ const paths = require("./paths");
 const configStore = require("./config");
 const { validateProxyUrl, validateProxySettings } = require("./tunnel-proxy");
 const legacy = require("./legacy");
-const { Services } = require("./services");
-const { ActivityFeeds } = require("./feeds");
+const { AccountManager } = require("./accounts");
+const accountContext = require("./account-context");
 const skills = require("./skills");
 const { MAX_ZIP_BYTES, MAX_ZIP_ENTRIES, MAX_ZIP_UNCOMPRESSED_BYTES, assertExtractedTreeContained } = require("./zip-safety");
 const { psQuote, runPowershell } = require("./shell-util");
@@ -28,9 +28,15 @@ let mainWindow = null;
 let tray = null;
 let quitting = false;
 let statusTimer = null;
-const services = new Services();
-const feeds = new ActivityFeeds();
-const pendingSkillSources = new Set();
+const accounts = new AccountManager({ app });
+const services = accounts.services;
+const feeds = accounts.feeds;
+const pendingSkillSourcesByAccount = new Map();
+function skillSources() {
+  const id = accounts.currentId;
+  if (!pendingSkillSourcesByAccount.has(id)) pendingSkillSourcesByAccount.set(id, new Set());
+  return pendingSkillSourcesByAccount.get(id);
+}
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -53,7 +59,16 @@ if (!app.requestSingleInstanceLock()) {
       app.quit();
       return;
     }
-    bootstrap();
+    try {
+      accounts.init();
+      accounts.run(accounts.selectedId, () => bootstrap()).catch((error) => {
+        dialog.showErrorBox("账号初始化失败", error.message);
+        app.quit();
+      });
+    } catch (error) {
+      dialog.showErrorBox("账号索引读取失败", error.message);
+      app.quit();
+    }
   });
 }
 
@@ -88,8 +103,14 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, "..", "renderer", "index.html"));
   mainWindow.on("close", (event) => {
     if (quitting) return;
-    const cfg = configStore.load();
-    const anyManaged = services.mcp.isAlive() || services.tunnel.isAlive();
+    let cfg;
+    try {
+      cfg = accounts.readConfig(accounts.selectedId);
+    } catch (error) {
+      notice("error", `配置读取失败，无法判断窗口关闭策略: ${error.message}`);
+      return;
+    }
+    const anyManaged = accounts.anyAlive();
     if (cfg.minimizeToTray && anyManaged && tray) {
       event.preventDefault();
       mainWindow.hide();
@@ -115,10 +136,10 @@ function createTray() {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: "显示窗口", click: showWindow },
     { type: "separator" },
-    { label: "启动全部", click: () => services.startAll().catch((e) => notice("error", e.message)) },
-    { label: "停止全部", click: () => services.stopAll().catch((e) => notice("error", e.message)) },
+    { label: "启动当前账号", click: () => accounts.run(accounts.selectedId, async () => services.startAll()).catch((e) => notice("error", e.message)) },
+    { label: "停止当前账号", click: () => accounts.run(accounts.selectedId, async () => services.stopAll()).catch((e) => notice("error", e.message)) },
     { type: "separator" },
-    { label: "退出（停止由启动器管理的服务）", click: () => requestQuit() },
+    { label: "退出（停止本程序管理的所有账号）", click: () => requestQuit() },
   ]));
   tray.on("click", showWindow);
 }
@@ -130,6 +151,9 @@ function showWindow() {
 }
 
 function send(channel, payload) {
+  if (payload && !Array.isArray(payload) && !payload.accountId && ["notice", "setup:progress"].includes(channel)) {
+    payload = { ...payload, accountId: accountContext.current()?.id || accounts.selectedId };
+  }
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
 }
 
@@ -155,13 +179,13 @@ function isTemporarySkillPath(value) {
 
 function discardTemporarySkillPath(value) {
   if (!value || !isTemporarySkillPath(value)) return false;
-  pendingSkillSources.delete(path.resolve(value));
+  skillSources().delete(path.resolve(value));
   fs.rmSync(path.resolve(value), { recursive: true, force: true });
   return true;
 }
 
 function cleanupTemporarySkillSources() {
-  for (const source of [...pendingSkillSources]) discardTemporarySkillPath(source);
+  for (const source of [...skillSources()]) discardTemporarySkillPath(source);
   const root = localSkillsDir();
   if (!fs.existsSync(root)) return;
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
@@ -212,7 +236,7 @@ async function extractSkillZip(zipFile) {
   cleanupTemporarySkillSources();
   const destination = path.join(localSkillsDir(), `.staging-extract-${crypto.randomBytes(8).toString("hex")}`);
   fs.mkdirSync(destination, { recursive: true });
-  pendingSkillSources.add(destination);
+  skillSources().add(destination);
   try {
     await runPowershell(`Expand-Archive -LiteralPath '${psQuote(source)}' -DestinationPath '${psQuote(destination)}' -Force`);
     assertExtractedTreeContained(destination);
@@ -227,8 +251,8 @@ async function prepareSkillSource(source) {
   const raw = String(source || "").trim();
   if (!path.isAbsolute(raw)) throw new Error("Skill source 必须是绝对路径。");
   const resolved = path.resolve(raw);
-  if (pendingSkillSources.has(resolved) && fs.existsSync(resolved)) return resolved;
-  for (const pending of [...pendingSkillSources]) discardTemporarySkillPath(pending);
+  if (skillSources().has(resolved) && fs.existsSync(resolved)) return resolved;
+  for (const pending of [...skillSources()]) discardTemporarySkillPath(pending);
   return path.extname(resolved).toLowerCase() === ".zip" ? extractSkillZip(resolved) : resolved;
 }
 
@@ -248,7 +272,7 @@ function scheduleLogFlush() {
   if (logFlushTimer) return;
   logFlushTimer = setTimeout(() => {
     logFlushTimer = null;
-    const batch = pendingLogs.splice(0, pendingLogs.length);
+    const batch = pendingLogs.splice(0, pendingLogs.length).filter((entry) => entry.accountId === accounts.selectedId);
     if (batch.length) send("log", batch);
   }, 150);
 }
@@ -258,20 +282,44 @@ services.on("log", (entry) => {
 });
 services.on("status", (snapshot) => send("status", snapshot));
 // 外部进程（旧脚本/手动启动）没有可继承的 stdout，实时信息改从 HTTP 活动源拉取。
-feeds.on("lines", ({ name, lines }) => {
-  for (const line of lines) pendingLogs.push({ name, line });
+feeds.on("lines", ({ name, lines, accountId }) => {
+  for (const line of lines) pendingLogs.push({ name, line, accountId });
   scheduleLogFlush();
+});
+
+let accountListTimer = null;
+accounts.on("accounts-changed", () => {
+  if (accountListTimer || quitting) return;
+  accountListTimer = setTimeout(() => {
+    accountListTimer = null;
+    try { send("accounts:changed", accounts.list()); }
+    catch (error) { notice("error", error.message); }
+  }, 150);
+});
+accounts.on("account-error", ({ accountId, message }) => {
+  send("notice", { accountId, level: "error", message: `[${accounts.record(accountId).name}] ${message}`, at: Date.now() });
 });
 
 async function bootstrap() {
   app.setAppUserModelId(profile.appId);
   migrateLegacyUserData();
+  try { configStore.load(); }
+  catch (error) {
+    dialog.showErrorBox("ChatGPT Web Harness 配置读取失败", error.message);
+    app.quit();
+    return;
+  }
   try {
     const cfg = configStore.load();
     const hadStoredToken = Boolean(cfg.adminTokenEnc);
     configStore.ensureAdminToken(cfg);
-    if (!hadStoredToken && (profile.isolated || !process.env.ADMIN_TOKEN) && cfg.adminTokenEnc) configStore.save(cfg);
+    if (!hadStoredToken && (profile.isolated || accountContext.current() || !process.env.ADMIN_TOKEN) && cfg.adminTokenEnc) configStore.save(cfg);
   } catch (err) {
+    if (err && err.code === "CONFIG_READ_FAILED") {
+      dialog.showErrorBox("ChatGPT Web Harness 配置读取失败", err.message);
+      app.quit();
+      return;
+    }
     // Do not silently start an unauthenticated Admin server when the
     // per-user token cannot be protected; mcpSpawnSpec repeats this guard on
     // service start and reports a clear error to the UI.
@@ -287,25 +335,11 @@ async function bootstrap() {
   registerIpc();
 
   statusTimer = setInterval(() => {
-    services.refresh().catch(() => {});
+    accounts.refreshAll().catch(() => {});
   }, 3000);
-  services.refresh().catch(() => {});
+  accounts.refreshAll().catch(() => {});
 
-  const syncFeeds = () => {
-    const cfg = configStore.load();
-    let adminToken = "";
-    try { adminToken = configStore.getAdminToken(cfg); } catch (err) { services.note(`Admin 活动源鉴权不可用: ${err.message}`); }
-    feeds.configure({ adminPort: cfg.adminPort, tunnelPort: cfg.tunnelPort, adminToken });
-  };
-  syncFeeds();
-  services.on("status", syncFeeds);
-  feeds.start();
-
-  const cfg = configStore.load();
-  if (cfg.setupDone && cfg.autoStart) {
-    services.note("按配置自动启动服务 ...");
-    services.startAll().catch((err) => notice("error", err.message));
-  }
+  accounts.autoStart().catch((error) => notice("error", error.message));
 }
 
 /**
@@ -314,7 +348,7 @@ async function bootstrap() {
  */
 function migrateLegacyUserData() {
   // A preview must never import the installed app's ports, tokens or auto-start.
-  if (!profile.allowLegacyMigration) return;
+  if (!profile.allowLegacyMigration || accounts.currentId !== "default") return;
   try {
     const target = paths.configPath();
     if (fs.existsSync(target)) return;
@@ -332,8 +366,10 @@ function migrateLegacyUserData() {
 function wrap(handler) {
   return async (_event, payload) => {
     try {
-      const result = await handler(payload);
-      return { ok: true, result };
+      if (quitting) throw new Error("程序正在退出。");
+      const id = payload && typeof payload._accountId === "string" ? payload._accountId : accounts.selectedId;
+      const result = await accounts.run(id, () => handler(payload));
+      return { ok: true, result, accountId: id };
     } catch (err) {
       return { ok: false, error: err && err.message ? err.message : String(err) };
     }
@@ -341,8 +377,16 @@ function wrap(handler) {
 }
 
 function registerIpc() {
+  ipcMain.handle("accounts:list", wrap(async () => accounts.list()));
+  ipcMain.handle("accounts:create", wrap(async (payload) => accounts.create(payload || {})));
+  ipcMain.handle("accounts:select", wrap(async (payload) => accounts.select(String(payload?.id || ""))));
+  ipcMain.handle("accounts:rename", wrap(async (payload) => accounts.rename(String(payload?.id || ""), payload?.name)));
+
   ipcMain.handle("app:info", wrap(async () => ({
     name: APP_NAME,
+    accountId: accounts.currentId,
+    accountName: accounts.record(accounts.currentId).name,
+    multiAccount: true,
     isolated: profile.isolated,
     version: app.getVersion(),
     electron: process.versions.electron,
@@ -353,24 +397,28 @@ function registerIpc() {
     logsDir: paths.logsDir(),
     configPath: paths.configPath(),
     encryptionAvailable: configStore.encryptionAvailable(),
-    legacyKeys: paths.isPackaged() || profile.isolated ? [] : legacy.legacyKeyFiles().map((k) => k.label),
-    legacyTunnelId: paths.isPackaged() || profile.isolated ? "" : (legacy.readDotEnvValue("OPENAI_TUNNEL_ID") || legacy.readProfileTunnelId("business-local.yaml")),
-    legacyWorkspace: paths.isPackaged() || profile.isolated ? "" : legacy.readDotEnvValue("WORKSPACE_PATH"),
+    legacyKeys: paths.isPackaged() || profile.isolated || accounts.currentId !== "default" ? [] : legacy.legacyKeyFiles().map((k) => k.label),
+    legacyTunnelId: paths.isPackaged() || profile.isolated || accounts.currentId !== "default" ? "" : (legacy.readDotEnvValue("OPENAI_TUNNEL_ID") || legacy.readProfileTunnelId("business-local.yaml")),
+    legacyWorkspace: paths.isPackaged() || profile.isolated || accounts.currentId !== "default" ? "" : legacy.readDotEnvValue("WORKSPACE_PATH"),
     migration: paths.getMigrationStatus(),
   })));
 
-  ipcMain.handle("config:get", wrap(async () => configStore.publicView(configStore.load())));
+  ipcMain.handle("config:get", wrap(async () => configStore.publicView(accounts.readConfig())));
 
   ipcMain.handle("config:save", wrap(async (payload) => {
     const cfg = configStore.load();
+    accounts.assertStopped();
     applyConfigPayload(cfg, payload || {});
+    accounts.validateConfig(accounts.currentId, cfg);
     configStore.save(cfg);
+    accounts.emit("accounts-changed");
     services.refresh().catch(() => {});
     return configStore.publicView(cfg);
   }));
 
   ipcMain.handle("config:importLegacyKey", wrap(async (payload) => {
-    if (paths.isPackaged() || profile.isolated) throw new Error("打包版和隔离版不支持从原仓库导入旧密钥。");
+    if (paths.isPackaged() || profile.isolated || accounts.currentId !== "default") throw new Error("打包版、隔离版和新增账号不支持导入原仓库密钥。");
+    accounts.assertStopped();
     const label = payload && payload.label;
     const entry = legacy.legacyKeyFiles().find((k) => k.label === label);
     if (!entry) throw new Error(`未找到 ${label} 的旧密钥文件。`);
@@ -398,7 +446,10 @@ function registerIpc() {
     return file;
   }));
 
-  ipcMain.handle("setup:run", wrap(async (payload) => runSetup(payload || {})));
+  ipcMain.handle("setup:run", wrap(async (payload) => {
+    accounts.assertStopped();
+    return services.withBusy(() => runSetup(payload || {}));
+  }));
 
   ipcMain.handle("status:get", wrap(async () => services.collectStatus()));
   ipcMain.handle("skills:catalog", wrap(async () => {
@@ -440,7 +491,7 @@ function registerIpc() {
   ipcMain.handle("skills:inspectSource", wrap(async (payload) => {
     const source = await prepareSkillSource(payload && payload.source);
     const inspected = await skills.inspectSource(source);
-    return { ...inspected, source, temporary: pendingSkillSources.has(path.resolve(source)) };
+    return { ...inspected, source, temporary: skillSources().has(path.resolve(source)) };
   }));
   ipcMain.handle("skills:discardSource", wrap(async (payload) => {
     const source = payload && payload.source;
@@ -488,13 +539,13 @@ function registerIpc() {
   }));
   ipcMain.handle("app:uninstall", wrap(async () => {
     const userData = path.resolve(app.getPath("userData"));
-    const runtime = path.resolve(paths.runtimeDir());
+    const runtime = accounts.run("default", () => path.resolve(paths.runtimeDir()));
     const override = String(process.env.CLC_RUNTIME_DIR || "").trim();
     const deleteOptions = { userData, runtime, packaged: paths.isPackaged(), override };
     const result = await dialog.showMessageBox(mainWindow, {
       type: "warning",
       title: "卸载并清理数据",
-      message: "确定删除 ChatGPT Web Harness 的配置、日志和已安装 Skill？",
+      message: "确定删除此应用中所有账号的配置、日志和已安装 Skill？",
       detail: `${userData}\n\nportable/zip 版不会删除 EXE 文件；完成后可手动删除它。此操作不可撤销。`,
       buttons: ["取消", "删除数据并退出"],
       defaultId: 0,
@@ -504,7 +555,7 @@ function registerIpc() {
     if (result.response !== 1) return { canceled: true };
     await paths.uninstallUserData({
       ...deleteOptions,
-      stopExternal: profile.isolated ? undefined : async () => { try { await services.stopExternal(); } catch {} },
+      stopExternal: undefined,
       shutdown: () => services.shutdown(),
       stopFeeds: () => feeds.stop(),
     });
@@ -601,6 +652,7 @@ async function runSetup(payload) {
   const progress = (stage, message) => send("setup:progress", { stage, message });
   const cfg = configStore.load();
   applyConfigPayload(cfg, payload);
+  accounts.validateConfig(accounts.currentId, cfg);
   if (!cfg.tunnelId) throw new Error("请填写 Tunnel ID。");
   if (!cfg.apiKeyEnc) throw new Error("请填写 Runtime API Key。");
   if (!cfg.workspacePath) throw new Error("请选择工作区目录。");
@@ -633,6 +685,7 @@ async function runSetup(payload) {
   }
   cfg.setupDone = true;
   configStore.save(cfg);
+  accounts.emit("accounts-changed");
   services.note("初始化完成。");
   services.refresh().catch(() => {});
   return { ok: true, doctor: doctor.output, config: configStore.publicView(cfg) };
@@ -642,10 +695,13 @@ app.on("before-quit", () => {
   quitting = true;
   if (statusTimer) clearInterval(statusTimer);
   feeds.stop();
-  cleanupTemporarySkillSources();
+  if (accountListTimer) clearTimeout(accountListTimer);
+  if (accounts.registry) for (const row of accounts.registry.accounts) {
+    try { accounts.run(row.id, cleanupTemporarySkillSources); } catch { /* never clean another account on failure */ }
+  }
 });
 app.on("will-quit", (event) => {
-  if (services.mcp.isAlive() || services.tunnel.isAlive()) {
+  if (accounts.anyAlive()) {
     event.preventDefault();
     services.shutdown().finally(() => app.exit(0));
   }

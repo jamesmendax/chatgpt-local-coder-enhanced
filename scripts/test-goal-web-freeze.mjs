@@ -181,15 +181,17 @@ try {
   // Goal-only completion must not demand a non-existent durable task finish.
   const finishWorkspace = path.join(tmpRoot, "goal-only-finish");
   await withServer(finishWorkspace, "goal-finish-session", async (client) => {
+    const inspectedFile = path.join(finishWorkspace, "inspection.txt");
+    await fs.writeFile(inspectedFile, "finish-chain fixture");
     data(await client.callTool({
       name: "goal",
       arguments: {
         action: "create",
         objective: "Verify a goal-only finish chain",
-        success_criteria: [{ name: "workspace was inspected" }],
+        success_criteria: [{ name: "workspace was inspected", verification: { kind: "file_exists", target: inspectedFile } }],
       },
     }));
-    const inspected = data(await client.callTool({ name: "list_directory", arguments: { path: finishWorkspace } }));
+    const inspected = data(await client.callTool({ name: "file_info", arguments: { path: inspectedFile, sha256: true } }));
     const evidenceId = inspected.goal_run_evidence?.id;
     assert.ok(evidenceId, "read-only inspection did not expose GoalRun evidence");
     const confirmed = await client.callTool({
@@ -207,6 +209,8 @@ try {
   // completion call, and a failed task completion must stop rather than loop.
   const taskFinishWorkspace = path.join(tmpRoot, "goal-task-finish");
   await withServer(taskFinishWorkspace, "goal-task-finish-session", async (client) => {
+    const inspectedFile = path.join(taskFinishWorkspace, "inspection.txt");
+    await fs.writeFile(inspectedFile, "task finish-chain fixture");
     const task = data(await client.callTool({
       name: "task_state",
       arguments: {
@@ -222,10 +226,10 @@ try {
       arguments: {
         action: "create",
         objective: "Complete the Goal and its durable task in order",
-        success_criteria: [{ name: "workspace inspected" }],
+        success_criteria: [{ name: "workspace inspected", verification: { kind: "file_exists", target: inspectedFile } }],
       },
     }));
-    const inspected = data(await client.callTool({ name: "list_directory", arguments: { path: taskFinishWorkspace } }));
+    const inspected = data(await client.callTool({ name: "file_info", arguments: { path: inspectedFile, sha256: true } }));
     const evidenceId = inspected.goal_run_evidence?.id;
     assert.ok(evidenceId, "task-backed Goal inspection did not expose evidence");
     data(await client.callTool({

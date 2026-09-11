@@ -31,7 +31,8 @@ async function main() {
   const spaced = path.join(tmp, "space path");
   fs.mkdirSync(spaced);
   const spacedCommand = "& '" + shim.replace(/'/g, "''") + "' -e 'process.stdout.write(process.argv[1])' '" + spaced.replace(/'/g, "''") + "'";
-  const spacedRun = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", spacedCommand], { cwd: tmp, env, windowsHide: true, encoding: "utf8" });
+  const powershell = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const spacedRun = spawnSync(powershell, ["-NoProfile", "-NonInteractive", "-Command", spacedCommand], { cwd: tmp, env, windowsHide: true, encoding: "utf8" });
   if (spacedRun.status !== 0 || spacedRun.stdout.trim() !== spaced) throw new Error("node.cmd space path forwarding failed: status=" + spacedRun.status + " stdout=" + JSON.stringify(spacedRun.stdout) + " stderr=" + JSON.stringify(spacedRun.stderr));
   // Use an explicitly encrypted synthetic credential, never a borrowed
   // process-level Admin token or a newly generated production credential.

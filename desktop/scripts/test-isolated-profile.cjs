@@ -54,7 +54,10 @@ test("package, lockfile and builder use the same isolated identity", () => {
   const builder = fs.readFileSync(path.join(__dirname, "../electron-builder.yml"), "utf8");
   assert.equal(pkg.name, "chatgpt-web-harness-isolated");
   assert.equal(pkg.harnessVariant, "isolated");
-  assert.match(pkg.version, /-isolated\./);
+  // Isolation is established by the package/app/data identity, not a prerelease suffix.
+  // A stable 0.2.0 release retains the same isolation guarantees as preview builds.
+  assert.match(pkg.version, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/);
+  assert.equal(pkg.scripts.acceptance, "node scripts/acceptance-multiaccount.mjs");
   assert.equal(lock.name, pkg.name);
   assert.equal(lock.version, pkg.version);
   assert.equal(lock.packages[""].name, pkg.name);
@@ -95,6 +98,7 @@ function runMigration(selectedProfile, fileSystem) {
   assert.ok(start >= 0 && end > start);
   vm.runInNewContext(text.slice(start, end) + "\nmigrateLegacyUserData();", {
     profile: selectedProfile, fs: fileSystem, path,
+    accounts: { currentId: "default" },
     paths: { configPath: () => path.join(root, ".codex", "preview", "config.json") },
     app: { getPath: () => path.join(root, ".codex", "preview") },
     services: { note: () => {} },
@@ -239,6 +243,9 @@ function runMainUntilLock(f) {
     if (name === "./isolated-runtime") return {
       initializeIsolatedRuntime: (app) => initializeIsolatedRuntime(app, { env: f.env, fs: f.io }),
     };
+    if (name === "./accounts") return { AccountManager: class {
+      constructor() { f.events.push("services"); this.services = {}; this.feeds = {}; }
+    } };
     if (name === "./services") return { Services: class { constructor() { f.events.push("services"); } } };
     if (name === "./feeds") return { ActivityFeeds: class {} };
     if (name.startsWith("./") && name !== "./app-profile") return {};

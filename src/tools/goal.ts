@@ -73,6 +73,12 @@ const criterionSchema = z.object({
   passed: z.boolean().optional().default(false),
   detail: z.string().max(2000).optional(),
   requires_confirmation: z.boolean().optional(),
+  verification: z.object({
+    kind: z.enum(["command", "visual", "file_exists"]),
+    target: z.string().min(1).max(2000).describe("Absolute test working directory, or visual/file target"),
+    command: z.string().min(1).max(2000).optional().describe("Exact verification command for command checks"),
+    files: z.array(z.string().min(1).max(2000)).min(1).max(128).optional().describe("Source/test files verified by the command; edits invalidate its evidence"),
+  }).optional().describe("Required before machine confirmation. file_exists proves existence only; command verifies tests; visual verifies appearance."),
 });
 
 export function registerGoalTool(server: McpServer, workspaceRoot: string): void {

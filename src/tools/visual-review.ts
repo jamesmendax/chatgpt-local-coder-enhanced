@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { toolAnnotations } from "../lib/tool-annotations.js";
 import { toolError, toolResult } from "../lib/tool-result.js";
 import { performVisualReview } from "../lib/visual-harness.js";
+import { visualDeliveryFeedback } from "../lib/visual-feedback.js";
 import {
   assessVisualReviewRecord,
   critiqueVisualReviewRecord,
@@ -56,7 +57,7 @@ export function registerVisualReviewTool(server: McpServer, workspaceRoot: strin
     {
       title: "Visual Review",
       description:
-        `Render to pixels. Completion: review -> critique -> assess; server quality gate owns PASS. Max ${MAX_VISUAL_ITERATIONS} versions.`,
+        `Inspect appearance of SVG/images, web pages, PDF, PPTX or DOCX. review returns pixels; critique records your inspection; assess checks readiness. Follow next_required_action: failed quality requires edits and a new review. Scores are caller assessments. Max ${MAX_VISUAL_ITERATIONS} versions.`,
       inputSchema: {
         action: z.enum(["review", "status", "critique", "assess"]).optional().default("review"),
         target: z.string().min(1).optional(),
@@ -95,7 +96,7 @@ export function registerVisualReviewTool(server: McpServer, workspaceRoot: strin
         if (action === "status") {
           if (!review_id) throw new Error("visual_review action=status requires review_id");
           const freshness = await getVisualReviewFreshness(workspaceRoot, review_id);
-          return toolResult("visual_review", { action, ...freshness }, { summary: freshness.reason });
+          return toolResult("visual_review", { action, ...freshness, ...visualDeliveryFeedback(freshness) }, { summary: freshness.reason });
         }
         if (action === "critique") {
           if (!review_id) throw new Error("visual_review action=critique requires review_id");
@@ -122,8 +123,10 @@ export function registerVisualReviewTool(server: McpServer, workspaceRoot: strin
             summary: assessment_summary,
           });
           const freshness = await getVisualReviewFreshness(workspaceRoot, review_id);
+          const feedback = visualDeliveryFeedback(freshness);
           return toolResult("visual_review", {
             action,
+            ...feedback,
             review_id,
             target: record.target,
             kind: record.kind,
@@ -135,8 +138,7 @@ export function registerVisualReviewTool(server: McpServer, workspaceRoot: strin
             model_visual_iteration: freshness.model_visual_iteration,
             machine_blocking_issues: record.machine_blocking_issues,
             fresh: freshness.fresh,
-            next_required_action: "assess",
-          }, { summary: `visual critique: ${record.model_visual_critique?.delivery_recommendation ?? "pending"}; quality_gate=${freshness.model_visual_quality_gate.status}` });
+          }, { summary: `visual critique: delivery_ready=false; next=${feedback.next_required_action}; quality=${freshness.model_visual_quality_gate.status}` });
         }
         if (action === "assess") {
           if (!review_id) throw new Error("visual_review action=assess requires review_id");
@@ -155,8 +157,10 @@ export function registerVisualReviewTool(server: McpServer, workspaceRoot: strin
             summary: assessment_summary,
           });
           const freshness = await getVisualReviewFreshness(workspaceRoot, review_id);
+          const feedback = visualDeliveryFeedback(freshness);
           return toolResult("visual_review", {
             action,
+            ...feedback,
             review_id,
             target: record.target,
             kind: record.kind,
@@ -178,11 +182,12 @@ export function registerVisualReviewTool(server: McpServer, workspaceRoot: strin
             recommended_next_pages: freshness.model_visual_coverage.missing_pages.slice(0, 12),
             machine_blocking_issues: record.machine_blocking_issues,
             fresh: freshness.fresh,
-          }, { summary: `visual assessment: semantic=${record.model_visual_assessment?.verdict ?? "pending"} quality=${freshness.model_visual_quality_status}` });
+          }, { summary: `visual assessment: delivery_ready=${feedback.delivery_ready}; next=${feedback.next_required_action}; quality=${freshness.model_visual_quality_status}` });
         }
         if (!target?.trim()) throw new Error("visual_review action=review requires target");
         const result = await performVisualReview(workspaceRoot, { target, quality_bar, ...options });
-        return visualReviewResult(result.data, result.images);
+        const freshness = await getVisualReviewFreshness(workspaceRoot, String(result.data.review_id));
+        return visualReviewResult({ ...result.data, ...visualDeliveryFeedback(freshness) }, result.images);
       } catch (error) {
         return toolError("visual_review", error instanceof Error ? error.message : String(error));
       }
