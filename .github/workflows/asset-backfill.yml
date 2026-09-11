@@ -1,0 +1,77 @@
+name: Backfill Historical Release Assets
+
+on:
+  push:
+    branches:
+      - "release/asset-backfill-20260911"
+
+permissions:
+  contents: write
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      BASE_URL: "https://jacob-triple-valued-nations.trycloudflare.com"
+      ACCESS_PATH: "94a57a06b7d142d48a90240d0b86ca3c8f218eca7aba4a039bcdcd027274794f"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Backfill verified local assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/release-assets
+          while IFS='|' read -r id tag name sha bytes; do
+            [ -n "$id" ] || continue
+            echo "=== $tag :: $name ==="
+            remote="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" | jq -r --arg n "$name" '.assets[] | select(.name==$n) | [.id,.size,(.digest // "")] | @tsv' | head -n1 || true)"
+            if [ -n "$remote" ]; then
+              IFS=$'\t' read -r asset_id remote_size remote_digest <<< "$remote"
+              if [ "$remote_size" = "$bytes" ] && { [ -z "$remote_digest" ] || [ "$remote_digest" = "sha256:$sha" ]; }; then
+                echo "SKIP already verified on GitHub"
+                continue
+              fi
+              echo "Removing mismatched existing asset id=$asset_id"
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+            fi
+            out="/tmp/release-assets/$name"
+            curl --fail --location --retry 8 --retry-all-errors --connect-timeout 30 --max-time 7200 "$BASE_URL/$ACCESS_PATH/$id" --output "$out"
+            actual_bytes="$(stat -c%s "$out")"
+            [ "$actual_bytes" = "$bytes" ] || { echo "size mismatch: expected=$bytes actual=$actual_bytes"; exit 1; }
+            echo "$sha  $out" | sha256sum --check --strict
+            gh release upload "$tag" "$out"
+            remote="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" | jq -r --arg n "$name" '.assets[] | select(.name==$n) | [.size,(.digest // "")] | @tsv' | head -n1)"
+            IFS=$'\t' read -r remote_size remote_digest <<< "$remote"
+            [ "$remote_size" = "$bytes" ] || { echo "GitHub size verification failed"; exit 1; }
+            if [ -n "$remote_digest" ] && [ "$remote_digest" != "sha256:$sha" ]; then
+              echo "GitHub digest verification failed"
+              exit 1
+            fi
+            rm -f "$out"
+            echo "UPLOAD_VERIFIED $tag :: $name :: $sha"
+          done <<'ASSETS'
+          0|v0.1.0|ChatGPT Web Harness-0.1.0-portable.exe|df9be43b9ff1a485ad5221f2e8ec4e46cb01791032798259d5afe2f3a38cfbe4|153340921
+          1|v0.1.0|ChatGPT Web Harness-0.1.0-setup.exe|fbf2492d1b9e8f877f533bd0752bb6983b31ce963c907c822c8a43b8aee8f1a0|107268445
+          2|v0.1.0|ChatGPT Web Harness-0.1.0-setup.exe.blockmap|fc5b49add76febe361aa0febbc5657349b0f512d657e824b2bd96a6faa6b4488|112961
+          3|v0.1.0|ChatGPT Web Harness-0.1.0-x64.zip|733aa511766a8054a15e6f2e30aa2130f2f64f26fe21b5522e0ea3fef010e86f|149748780
+          4|v0.1.1|ChatGPT Web Harness-0.1.1-portable.exe|48f4831d54acb9853e7217f6e9c677ca5b8fdc3810e71da09f214746a9929b23|105638103
+          5|v0.1.1|ChatGPT Web Harness-0.1.1-setup.exe|219b31002de840ba48129b0a4a5ef06d5b2e55b1667ae8f9f664525f4ad36bec|105878369
+          6|v0.1.1|ChatGPT Web Harness-0.1.1-setup.exe.blockmap|6bffdb81c2f17d92f3fbeadb156ac6cf34a837926704af4d7a56b4857910d7ab|111258
+          7|v0.1.1|ChatGPT Web Harness-0.1.1-x64.zip|b04ad201a379ef0af5b6f564828653006f480be2f9ed024a64e85e378530fea4|147873578
+          8|v0.1.2|ChatGPT Web Harness-0.1.2-portable.exe|f41376bf7f80d3163f691491a28665aa4006056a931847a94b4da751c4198d9a|94631477
+          9|v0.1.3|ChatGPT Web Harness-0.1.3-portable.exe|3060a017468e838015fb5482055e7dd9da861b815dab3057ebddd6d6bb29c699|105644562
+          10|v0.1.3|ChatGPT Web Harness-0.1.3-setup.exe|4d0b9709a6e67fc1926cbe48d47ed35e3dc5fba718cb76b53a45b3d4f13ba13e|105884844
+          11|v0.1.3|ChatGPT Web Harness-0.1.3-setup.exe.blockmap|b9fa84d1999b6e8f79ce49f207335ced3636c0243b4e6d423e43438d60054cac|111251
+          12|v0.1.3|ChatGPT Web Harness-0.1.3-x64.zip|2b4464c5996636908cdc75a5c03adbd59af864e93ebbfd195b022ddd2eda0f54|147881120
+          13|v0.1.3|SHA256SUMS-0.1.3.txt|5b8f328015575866b854361fb0a55c43293202dd1c4f6e19a9976a70c63afa7d|307
+          14|v0.1.5-isolated.1|ChatGPT Web Harness Isolated-0.1.5-isolated.1-portable.exe|aae92151afaf46356fb80081b26dc27d1439b23f26b5d9af4d1bd184fe46007d|105657241
+          15|v0.1.5-isolated.1|ChatGPT Web Harness Isolated-0.1.5-isolated.1-setup.exe|e4f0c8da586543bc7cf196f40a5c93d210dbc5a88c5a4dfca72f594677bc098e|105892707
+          16|v0.1.5-isolated.1|ChatGPT Web Harness Isolated-0.1.5-isolated.1-setup.exe.blockmap|3dc11b9906c75523da805e479fd27852fabb7b8659ed339d862169a35dfdd621|111080
+          17|v0.2.0|ChatGPT Web Harness Isolated-0.2.0-portable.exe|8c3685451e186e3ddf0ae9a573a78a0049274a81132bc58e88059932319aea0b|108480828
+          18|v0.2.0|ChatGPT Web Harness Isolated-0.2.0-setup.exe|9a01b1f31e48a6eb3396c95856a9f64f54646d45f3433b21100c252dbbd6e2bf|108716280
+          19|v0.2.0|ChatGPT-Web-Harness-Isolated-0.2.0-release.zip|fd4922321ee6c7f728950e6cbe9e0f15ca39b30fa105605d71a07cb033e6d2e3|218945011
+          20|v0.2.0|ChatGPT-Web-Harness-Isolated-0.2.0-source.zip|318caa2ae39701bf9a8719eec2c122ba044cb489a433878dfabbf9cc620fa468|8726495
+          21|v0.2.0|SHA256SUMS.txt|9a0a342eaf95ca02a8a7578b598f86be2bedc985c6b8e06b0792dd67f206bd03|480
+          ASSETS
+          echo 'ALL_22_ASSETS_VERIFIED'
