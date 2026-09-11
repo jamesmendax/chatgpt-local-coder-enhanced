@@ -1,0 +1,25 @@
+﻿{
+    "version":  "0.1.5-isolated.1",
+    "record_kind":  "historical-record-only",
+    "application_source_included":  false,
+    "installer_attached":  false,
+    "full_corresponding_source_snapshot_confirmed":  false,
+    "retained_artifacts":  [
+                               {
+                                   "filename":  "ChatGPT Web Harness Isolated-0.1.5-isolated.1-portable.exe",
+                                   "bytes":  105657241,
+                                   "sha256":  "aae92151afaf46356fb80081b26dc27d1439b23f26b5d9af4d1bd184fe46007d"
+                               },
+                               {
+                                   "filename":  "ChatGPT Web Harness Isolated-0.1.5-isolated.1-setup.exe",
+                                   "bytes":  105892707,
+                                   "sha256":  "e4f0c8da586543bc7cf196f40a5c93d210dbc5a88c5a4dfca72f594677bc098e"
+                               },
+                               {
+                                   "filename":  "ChatGPT Web Harness Isolated-0.1.5-isolated.1-setup.exe.blockmap",
+                                   "bytes":  111080,
+                                   "sha256":  "3dc11b9906c75523da805e479fd27852fabb7b8659ed339d862169a35dfdd621"
+                               }
+                           ],
+    "notice":  "The public working copy changed after these binaries were built. This tag records observed artifacts and hashes only and does not substitute later source for the historical build."
+}
