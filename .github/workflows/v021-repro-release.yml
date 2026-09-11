@@ -1,0 +1,100 @@
+name: v0.2.1 Reproducible Setup Recovery
+
+on:
+  push:
+    branches:
+      - "release/v0.2.1-actions"
+    paths:
+      - ".github/workflows/v021-repro-release.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild-and-recover:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EXPECTED_SETUP_SHA256: f02bf610073e31b1d6f7bf1b060f9369d1f3c62811349c1f036f72b834bb410f
+      EXPECTED_SETUP_BYTES: "116571735"
+      REMOTE_NAME: ChatGPT.Web.Harness.Isolated-0.2.1-setup.exe
+    steps:
+      - name: Checkout exact v0.2.1 source
+        uses: actions/checkout@v4
+        with:
+          ref: v0.2.1
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+
+      - name: Install and build runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm --prefix desktop ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run timeout regression
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node scripts/test-shell-persist.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build NSIS setup only
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm --prefix desktop run stage
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Push-Location desktop
+          npx electron-builder --win nsis --config electron-builder.yml --publish=never
+          $ec = $LASTEXITCODE
+          Pop-Location
+          if ($ec -ne 0) { exit $ec }
+
+      - name: Require exact local-approved bytes
+        id: verify
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = 'desktop/release/ChatGPT Web Harness Isolated-0.2.1-setup.exe'
+          if (-not (Test-Path -LiteralPath $setup)) { throw "Missing setup: $setup" }
+          $f = Get-Item -LiteralPath $setup
+          $sha = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "RUNNER_SETUP|$($f.Length)|$sha"
+          if ($f.Length -ne [long]$env:EXPECTED_SETUP_BYTES) { throw "Setup byte count is not reproducible" }
+          if ($sha -ne $env:EXPECTED_SETUP_SHA256) { throw "Setup SHA256 is not reproducible" }
+          Copy-Item -LiteralPath $setup -Destination $env:REMOTE_NAME
+
+      - name: Recover release asset only after byte-for-byte match
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = (gh api repos/$env:GITHUB_REPOSITORY/releases/tags/v0.2.1 | ConvertFrom-Json)
+          $existing = @($release.assets | Where-Object { $_.name -eq $env:REMOTE_NAME })
+          if ($existing.Count -gt 1) { throw "Duplicate setup assets" }
+          if ($existing.Count -eq 1 -and $existing[0].state -eq 'uploaded' -and [long]$existing[0].size -eq [long]$env:EXPECTED_SETUP_BYTES -and [string]$existing[0].digest -eq ('sha256:' + $env:EXPECTED_SETUP_SHA256)) {
+            Write-Host 'SETUP_ALREADY_VERIFIED'
+            exit 0
+          }
+          if ($existing.Count -eq 1) {
+            gh api -X DELETE "repos/$env:GITHUB_REPOSITORY/releases/assets/$($existing[0].id)"
+            if ($LASTEXITCODE -ne 0) { throw 'Failed deleting incomplete setup asset' }
+          }
+          gh release upload v0.2.1 $env:REMOTE_NAME
+          if ($LASTEXITCODE -ne 0) { throw 'Runner release upload failed' }
+          $after = (gh api repos/$env:GITHUB_REPOSITORY/releases/tags/v0.2.1 | ConvertFrom-Json).assets | Where-Object { $_.name -eq $env:REMOTE_NAME }
+          if (-not $after -or $after.state -ne 'uploaded' -or [long]$after.size -ne [long]$env:EXPECTED_SETUP_BYTES -or [string]$after.digest -ne ('sha256:' + $env:EXPECTED_SETUP_SHA256)) { throw 'Post-upload verification failed' }
+          Write-Host 'V021_SETUP_RECOVERED_EXACTLY'
