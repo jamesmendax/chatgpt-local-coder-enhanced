@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-const canonicalRepository = "jamesmendax/chatgpt-local-coder-enhanced";
+const canonicalRepository = "jamesmendax/chatgpt-web-harness";
 
 function normalizeGitHubRepository(value) {
   return String(value || "")

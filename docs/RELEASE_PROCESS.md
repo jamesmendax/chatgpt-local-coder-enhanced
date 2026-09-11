@@ -1,7 +1,7 @@
 # GitHub 仓库维护与自动发布说明
 
 产品名称：**ChatGPT Web Harness**
-目标仓库：https://github.com/jamesmendax/chatgpt-local-coder-enhanced
+目标仓库：https://github.com/jamesmendax/chatgpt-web-harness
 本地公开发布副本：`D:\chatgpt-local-coder-public`
 生产 MCP：`D:\chatgpt-local-coder`
 
@@ -12,8 +12,8 @@
 ## 标准发布流程
 
 1. 确认 GitHub 真实远端：`cd D:\chatgpt-local-coder-public && git remote -v && git fetch origin --prune && npm run check:release-target`
-2. 当前正确仓库应该是：`origin https://github.com/jamesmendax/chatgpt-local-coder-enhanced.git`
-3. 如果不是：`git remote set-url origin https://github.com/jamesmendax/chatgpt-local-coder-enhanced.git`
+2. 当前正确仓库应该是：`origin https://github.com/jamesmendax/chatgpt-web-harness.git`
+3. 如果不是：`git remote set-url origin https://github.com/jamesmendax/chatgpt-web-harness.git`
 4. 不要因为本地仓库旧，就直接 force push。先检查：`git status`、`git rev-list --left-right --count HEAD...origin/main`、`git log --oneline -10`
 5. 如果本地和 GitHub 已经分叉，要先备份：`git branch backup/pre-sync-YYYYMMDD && git stash push -m "pre-sync"`,然后再安全对齐 origin/main。
 6. 只移植已经在生产环境验证过的功能。
@@ -21,7 +21,7 @@
 8. 修改版本号(例如 `1.2.0 -> 1.3.0`):package.json 与 package-lock.json 的根 version 要保持一致。不要使用粗暴的全文件版本号替换,因为 package-lock.json 中可能存在第三方依赖恰好也是旧版本号——用 `npm install --package-lock-only` 同步。
 9. 更新 CHANGELOG.md。
 10. 创建对应 Release Notes 文件:`.github/releases/vX.Y.Z.md`。这个文件会被 GitHub Actions 自动拿来生成 GitHub Release 的说明。
-11. 正式发布之前必须跑完整验证：`npm run verify:release`。它先执行 `npm run verify`（`npm run check:secrets` + `npm run test:all`），再验证 `origin`、`package.json` 和 GitHub Actions 环境都指向唯一正确仓库。必须看到 `No obvious public secret patterns found.`、`=== ALL TESTS PASSED ===` 和 `Release target verified: jamesmendax/chatgpt-local-coder-enhanced`。任何一项失败都禁止发布。
+11. 正式发布之前必须跑完整验证：`npm run verify:release`。它先执行 `npm run verify`（`npm run check:secrets` + `npm run test:all`），再验证 `origin`、`package.json` 和 GitHub Actions 环境都指向唯一正确仓库。必须看到 `No obvious public secret patterns found.`、`=== ALL TESTS PASSED ===` 和 `Release target verified: jamesmendax/chatgpt-web-harness`。任何一项失败都禁止发布。
 12. 发布前检查 Git diff:`git status`、`git diff --check`、`git diff --stat`、`git diff --name-only`。仔细确认没有 `.env`、API Key、Tunnel ID、用户文件、临时文件、生产机专属数据。
 13. 创建 Release Commit:GitHub Release Workflow 使用 `if: startsWith(github.event.head_commit.message, 'release:')`,所以正式发布提交必须形如 `git commit -m "release: v1.3.0"`。普通的 `feat:`/`fix:`/`docs:` 提交不会触发 Release。
 14. 推送 GitHub：`git push origin main`。如果权限或远端校验失败，停止并修复 `origin`/账号权限；禁止通过新建另一个仓库绕过失败。到这里本机工作结束。

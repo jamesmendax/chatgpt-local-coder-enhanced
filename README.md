@@ -6,12 +6,12 @@
 
 **Self-hosted MCP server for ChatGPT with local files, shell, git, checkpoints, direct attachment saving, and verified binary-file transfer.**
 
-[![CI](https://github.com/jamesmendax/chatgpt-local-coder-enhanced/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesmendax/chatgpt-local-coder-enhanced/actions/workflows/ci.yml)
+[![CI](https://github.com/jamesmendax/chatgpt-web-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesmendax/chatgpt-web-harness/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-20%2B-43853d?style=flat-square)](https://nodejs.org/)
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-6366f1?style=flat-square)](https://modelcontextprotocol.io/)
 [![Maintenance](https://img.shields.io/badge/maintenance-active-brightgreen?style=flat-square)](CHANGELOG.md)
-[![Last commit](https://img.shields.io/github/last-commit/jamesmendax/chatgpt-local-coder-enhanced?style=flat-square)](https://github.com/jamesmendax/chatgpt-local-coder-enhanced/commits/main)
+[![Last commit](https://img.shields.io/github/last-commit/jamesmendax/chatgpt-web-harness?style=flat-square)](https://github.com/jamesmendax/chatgpt-web-harness/commits/main)
 
 </div>
 
@@ -20,7 +20,7 @@
 
 ## About this project
 
-ChatGPT Web Harness is maintained by [@jamesmendax](https://github.com/jamesmendax) in the existing [`jamesmendax/chatgpt-local-coder-enhanced`](https://github.com/jamesmendax/chatgpt-local-coder-enhanced) repository. The repository slug remains unchanged so existing clones, tags, Releases, and links continue to work. The project is based on [`hoangcoderr/chatgpt-local-coder`](https://github.com/hoangcoderr/chatgpt-local-coder) and remains MIT licensed.
+ChatGPT Web Harness is maintained by [@jamesmendax](https://github.com/jamesmendax) in [`jamesmendax/chatgpt-web-harness`](https://github.com/jamesmendax/chatgpt-web-harness). The repository was renamed from `chatgpt-local-coder-enhanced`; existing GitHub history, tags, and Releases were preserved. The project is based on [`hoangcoderr/chatgpt-local-coder`](https://github.com/hoangcoderr/chatgpt-local-coder) and remains MIT licensed.
 
 The enhanced branch adds and hardens direct ChatGPT attachment saving, ChatGPT web tool profiles, MCP session recovery, checkpoint/rewind support, verified binary-file transfer, file inspection, Windows dual-tunnel launchers, a portable Windows desktop client, and a safe Skill/plugin lifecycle. See [NOTICE.md](NOTICE.md) and [CHANGELOG.md](CHANGELOG.md).
 
@@ -89,8 +89,8 @@ The Node/TypeScript MCP server itself is cross-platform. The Windows tunnel conv
 ## Quick start
 
 ```powershell
-git clone https://github.com/jamesmendax/chatgpt-local-coder-enhanced.git
-cd chatgpt-local-coder-enhanced
+git clone https://github.com/jamesmendax/chatgpt-web-harness.git
+cd chatgpt-web-harness
 copy .env.example .env
 npm ci
 npm run build

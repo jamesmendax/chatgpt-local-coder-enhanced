@@ -4,11 +4,11 @@
   "description": "ChatGPT Web Harness: a self-hosted MCP sidecar with local files, shell, git, checkpoints, direct attachment saving, and verified binary transfer.",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jamesmendax/chatgpt-local-coder-enhanced.git"
+    "url": "https://github.com/jamesmendax/chatgpt-web-harness.git"
   },
-  "homepage": "https://github.com/jamesmendax/chatgpt-local-coder-enhanced#readme",
+  "homepage": "https://github.com/jamesmendax/chatgpt-web-harness#readme",
   "bugs": {
-    "url": "https://github.com/jamesmendax/chatgpt-local-coder-enhanced/issues"
+    "url": "https://github.com/jamesmendax/chatgpt-web-harness/issues"
   },
   "author": "hoangcoderr and contributors; enhanced fork maintained by jamesmendax",
   "type": "module",
