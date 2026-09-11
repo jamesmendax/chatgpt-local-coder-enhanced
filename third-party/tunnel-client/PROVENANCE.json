@@ -1,0 +1,28 @@
+{
+  "component": "OpenAI tunnel-client",
+  "license": "Apache-2.0",
+  "upstream_version": "v0.0.14",
+  "upstream_commit": "0f870e50a973fa820d4c409000059e181e8d242b",
+  "source": "https://github.com/openai/tunnel-client/tree/v0.0.14",
+  "archive_url": "https://github.com/openai/tunnel-client/releases/download/v0.0.14/tunnel-client-v0.0.14-windows-amd64.zip",
+  "checksums_url": "https://github.com/openai/tunnel-client/releases/download/v0.0.14/SHA256SUMS.txt",
+  "official_archive_sha256": "784ab8da7b5a88f0109f1fd8aaf0a1c86067430b896dddf307ef7e3cc49fa1a5",
+  "official_executable_sha256": "fcc85a69ec0ad82518e4f8964f60c45e31787957782a0fc9c1b0c44e82d61b9b",
+  "official_archive_verified": true,
+  "custom_build": true,
+  "custom_commit": "9b786ee3c71fa9ed990fcb06957220f7b2d7363d",
+  "patch": "patches/0001-terminal-response-retry-window.patch",
+  "patch_sha256": "484a68eb545a8241bca3285f1a46a13a274ba7580b7b0d1cce83fb0652ce35d7",
+  "derived_executable_sha256": "d52c415e671276c6d404ae4382c78118eff39232268973c9f0622f970fba1e4a",
+  "derived_executable_size": 31144960,
+  "bundled_executable_matches_official": false,
+  "build": {
+    "module_go_version": "1.27.0",
+    "cgo_enabled": false,
+    "trimpath": true,
+    "buildvcs": false,
+    "git_sha_ldflag": "9b786ee3c71fa9ed990fcb06957220f7b2d7363d"
+  },
+  "local_patch_scope": "Terminal JSON-RPC response delivery only: retain upstream notification anti-replay behavior and 3-attempt notification budget; give terminal responses a 90-second bounded retry window with a 64-attempt hard cap while preserving parent-context cancellation.",
+  "verification": "Upstream controlplane/dispatcher tests passed; loopback fault injection passed with 5s poll outage plus 30s terminal-response 503/reset outage, one local execution, unchanged process PID, and eventual response delivery."
+}

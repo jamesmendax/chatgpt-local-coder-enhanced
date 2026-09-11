@@ -1,0 +1,38 @@
+{
+  "name": "chatgpt-web-harness-isolated",
+  "version": "0.2.1",
+  "description": "ChatGPT Web Harness 桌面启动器：多账号隔离配置、独立 MCP / Secure MCP Tunnel 生命周期与实时活动日志",
+  "private": true,
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node scripts/start-isolated.cjs",
+    "stage": "node scripts/stage-harness.mjs",
+    "start:build": "npm run stage -- --build && node scripts/start-isolated.cjs",
+    "smoke": "node scripts/run-electron.cjs scripts/smoke.js",
+    "test": "npm run test:config && npm run test:accounts && npm run smoke && npm run test:migration && npm run test:node-shim && node scripts/test-zip-safety.mjs && node scripts/test-payload-manifest.mjs && npm run test:tunnel && npm run test:isolated && npm run test:status && npm run test:resilience && npm run test:computer-use && npm run test:renderer && npm run test:multi-process && npm run test:ui:isolated && npm run test:installer:isolated",
+    "test:config": "node --test scripts/test-config-read.cjs",
+    "test:accounts": "node --test scripts/test-accounts.cjs",
+    "test:migration": "node scripts/run-electron.cjs scripts/test-migration.js",
+    "test:node-shim": "node scripts/run-electron.cjs scripts/test-node-shim.js",
+    "acceptance": "node scripts/acceptance-multiaccount.mjs",
+    "acceptance:legacy": "node scripts/acceptance-portable.mjs",
+    "dist": "node scripts/stage-harness.mjs && node scripts/patch-portable-template.mjs && electron-builder --win nsis --config electron-builder.yml --publish=never && electron-builder --win portable --config electron-builder.yml --publish=never",
+    "dist:portable": "node scripts/stage-harness.mjs && node scripts/patch-portable-template.mjs && electron-builder --win portable --config electron-builder.yml --publish=never",
+    "dist:zip": "node scripts/stage-harness.mjs && electron-builder --win zip --config electron-builder.yml --publish=never",
+    "test:tunnel": "node --test scripts/test-tunnel-proxy.cjs scripts/test-tunnel-health.cjs scripts/test-tunnel-renderer.cjs",
+    "test:isolated": "node --test scripts/test-isolated-profile.cjs",
+    "test:status": "node --test scripts/test-status-async.cjs",
+    "test:resilience": "node --test scripts/test-network-resilience.cjs scripts/test-service-recovery-integration.cjs",
+    "test:computer-use": "node scripts/test-computer-use-account-isolation.cjs",
+    "test:renderer": "node --test scripts/test-renderer-runtime.cjs",
+    "test:multi-process": "node scripts/test-multi-process.cjs",
+    "test:ui:isolated": "node scripts/run-electron.cjs scripts/test-isolated-ui.cjs",
+    "test:status:native": "node scripts/test-status-native.cjs",
+    "test:installer:isolated": "node --test scripts/test-isolated-installer.cjs"
+  },
+  "devDependencies": {
+    "electron": "41.10.3",
+    "electron-builder": "^26.0.12"
+  },
+  "harnessVariant": "isolated"
+}

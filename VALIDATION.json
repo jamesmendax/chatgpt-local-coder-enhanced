@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "product": "ChatGPT Web Harness Isolated",
+  "version": "0.2.1",
+  "platform": "Windows x64",
+  "scope": "Sanitized standalone source snapshot and locally verified Installer/Portable acceptance; GitHub publication is verified separately after upload.",
+  "verifiedAt": "2026-09-11",
+  "artifacts": [
+    {
+      "name": "ChatGPT Web Harness Isolated-0.2.1-setup.exe",
+      "bytes": 116571735,
+      "sha256": "f02bf610073e31b1d6f7bf1b060f9369d1f3c62811349c1f036f72b834bb410f",
+      "authenticode": "NotSigned"
+    },
+    {
+      "name": "ChatGPT Web Harness Isolated-0.2.1-portable.exe",
+      "bytes": 105038338,
+      "sha256": "3fb387b9c7b9c840bc3f875666ceb3783caa44dc67dcbf79d6bde3ec22a53fc3",
+      "authenticode": "NotSigned"
+    },
+    {
+      "name": "ChatGPT Web Harness Isolated-0.2.1-setup.exe.blockmap",
+      "bytes": 121929,
+      "sha256": "a1dfc078f9eab6fc4f1b0fae9c802044c6f5f8d1c4c372c5be695cdaf81f50b8"
+    }
+  ],
+  "verification": {
+    "computerUsePerAccountPersistence": true,
+    "computerUseFreshSessionRuntime": true,
+    "gitTrustedWindowsFallbackWithTruncatedPath": true,
+    "rootRegressionSuite": true,
+    "desktopTunnelAndSmokeRegression": true,
+    "electronUiAcceptance": true,
+    "installerSafetyAcceptance": true,
+    "packagedRendererComputerUseOnOff": true,
+    "sourceToPackagedRuntimeHashMatch": true,
+    "historical020ArtifactsPreservedDuringBuild": true,
+    "liveMcpWasNotStoppedOrRestartedDuringAcceptance": true
+  },
+  "tunnelClient": {
+    "upstream": "OpenAI tunnel-client v0.0.14",
+    "derivedSha256": "d52c415e671276c6d404ae4382c78118eff39232268973c9f0622f970fba1e4a",
+    "derivedBytes": 31144960,
+    "patch": "third-party/tunnel-client/patches/0001-terminal-response-retry-window.patch",
+    "faultInjection": "5s poll outage + 30s terminal response 503/reset outage; one local execution, unchanged tunnel process, eventual result delivery"
+  },
+  "knownBoundaries": [
+    "Windows EXEs are not Authenticode-signed.",
+    "Computer Use enable/disable changes take effect in a new MCP session.",
+    "Per-account isolation is configuration/runtime/managed-process isolation, not an OS-level sandbox."
+  ]
+}
